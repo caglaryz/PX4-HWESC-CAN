@@ -121,6 +121,12 @@ UavcanHwescController::is_can_throttle(uint8_t esc_index) const
 
 	int32_t fn = 0;
 	if (param_get(_param_handles[esc_index], &fn) == 0 && fn > 0) {
+		// Yes, we do learn that the esc is can controlled.
+		// Also, hobbywing ESCs are usually for rotors.
+		// For a quadcopter, Motor1-4 function values are: 101-104
+		// At the hobbywing throttle channel side we expect 1-4
+		// Which correspond to the esc index from 0-3.
+		// TODO: Compare esc index with function value too.
 		return true;
 	}
 
@@ -160,7 +166,6 @@ UavcanHwescController::map_and_assign_all_once()
 		esc.is_expected = esc.can_throttle || (i < _rotor_count);
 		esc.duplicate_mapping = false;
 		esc.timestamp_get_esc_id = 0;
-
 	}
 
 	int res = get_esc_id_req();
@@ -326,7 +331,6 @@ UavcanHwescController::periodic_update(const uavcan::TimerEvent &) {
        	check_timeouts();			// Check for message timeouts and update active flags
 
 	maybe_publish_esc_status();		// Publish esc_status uORB
-	//maybe_publish_esc_hw_status();	// Publish surplus esc data
 }
 
 /**
@@ -356,9 +360,6 @@ UavcanHwescController::check_timeouts()
         if (esc.msg2_received && (now - esc.timestamp_msg2) > TIMEOUT_MSG2_US) {
             esc.msg2_received = false;
         }
-        //if (esc.msg3_received && (now - esc.timestamp_msg3) > TIMEOUT_MSG3_US) {
-        //    esc.msg3_received = false;
-        //}
 
         // --- Heartbeat (online) policy: MSG1 drives 'active' ---
         const bool msg1_fresh = (esc.timestamp_msg1 != 0) && ((now - esc.timestamp_msg1) <= TIMEOUT_MSG1_US);
@@ -433,8 +434,6 @@ UavcanHwescController::get_esc_id_cb(const uavcan::ServiceCallResult<com::hobbyw
 		return error_handler(ESC_ERROR_INVALID_THROTTLE_CH, nid, -1);
         	// PX4_WARN("GetEscID bad channel from node %u", nid);
     	}
-    	//_esc_index_by_node_id[nid] = idx;
-    	//_node_id_by_index[idx]     = nid;
 
     	ESCStatus &esc = _esc_data[idx];
 
