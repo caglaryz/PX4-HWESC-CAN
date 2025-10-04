@@ -38,6 +38,10 @@
  *
  * @author Pavel Kirienko <pavel.kirienko@gmail.com>
  *		 Andreas Jochum <Andreas@NicaDrone.com>
+ *
+ * Added Hobbywing ESC Control and Telemetry, 2025
+ * @author Caglar Yilmaz <yilmaz.caglar@tubitak.gov.tr>
+ *
  */
 
 #pragma once
@@ -45,6 +49,9 @@
 #include <px4_platform_common/px4_config.h>
 #include <px4_platform_common/atomic.h>
 #include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
+
+// for hobbywing ESC Control and Telemetry
+#include "hwesc.hpp"
 
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
 #include "actuators/esc.hpp"
@@ -54,7 +61,6 @@
 #if defined(CONFIG_UAVCAN_HARDPOINT_CONTROLLER)
 #include "actuators/hardpoint.hpp"
 #endif
-
 
 #include "allocator.hpp"
 
@@ -120,6 +126,31 @@ class UavcanNode;
  */
 
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
+class UavcanMixingInterfaceHWESC : public OutputModuleInterface
+{
+public:
+	UavcanMixingInterfaceHWESC(pthread_mutex_t &node_mutex,
+		UavcanHwescController &hwesc_controller)
+		: OutputModuleInterface(MODULE_NAME "-actuators-hwesc", px4::wq_configurations::uavcan),
+		  _node_mutex(node_mutex),
+		  _hwesc_controller(hwesc_controller) {}
+
+	bool updateOutputs(uint16_t outputs[MAX_ACTUATORS],
+			   unsigned num_outputs, unsigned num_control_groups_updated) override;
+
+	void mixerChanged() override;
+
+	MixingOutput &mixingOutput() { return _mixing_output; }
+
+protected:
+	void Run() override;
+private:
+	friend class UavcanNode;
+	pthread_mutex_t &_node_mutex;
+	UavcanHwescController &_hwesc_controller;
+	UavcanHwescTelemetry  &_hwesc_telemetry;
+	MixingOutput _mixing_output{"UAVCAN_EC", UavcanHwescController::MAX_ACTUATORS, *this, MixingOutput::SchedulingPolicy::Auto, false, false};
+};
 class UavcanMixingInterfaceESC : public OutputModuleInterface
 {
 public:
@@ -258,6 +289,9 @@ private:
 	uavcan::Node<>			_node;				///< library instance
 	pthread_mutex_t			_node_mutex;
 
+	// HWESC Telemetry
+	UavcanHwescTelemetry		_hwesc_telemetry;
+
 #if defined(CONFIG_UAVCAN_ARMING_CONTROLLER)
 	UavcanArmingStatus		_arming_status_controller;
 #endif
@@ -265,12 +299,16 @@ private:
 	UavcanBeepController		_beep_controller;
 #endif
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
+	// Added Hobbywing ESC Control
+	UavcanHwescController		_hwesc_controller;
+	UavcanMixingInterfaceHWESC 	_mixing_interface_hwesc{_node_mutex, _hwesc_controller, _hwesc_telemetry};
+
 	UavcanEscController		_esc_controller;
 	UavcanMixingInterfaceESC 	_mixing_interface_esc{_node_mutex, _esc_controller};
-
 	UavcanServoController		_servo_controller;
 	UavcanMixingInterfaceServo 	_mixing_interface_servo{_node_mutex, _servo_controller};
 #endif
+
 #if defined(CONFIG_UAVCAN_HARDPOINT_CONTROLLER)
 	UavcanHardpointController	_hardpoint_controller;
 #endif

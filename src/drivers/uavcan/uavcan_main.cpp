@@ -40,6 +40,9 @@
  * @author David Sidrane <david_s5@nscdg.com>
  * @author Andreas Jochum <Andreas@NicaDrone.com>
  *
+ * Added Hobbywing ESC Control and Telemetry, 2025
+ * @author Caglar Yilmaz <yilmaz.caglar@tubitak.gov.tr>
+ *
  */
 
 #include <px4_platform_common/px4_config.h>
@@ -87,6 +90,9 @@ UavcanNode::UavcanNode(uavcan::ICanDriver &can_driver, uavcan::ISystemClock &sys
 	_beep_controller(_node),
 #endif
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
+	// hwesc control
+	_hwesc_controller(_node),
+	// standard UAVCAN ESC
 	_esc_controller(_node),
 	_servo_controller(_node),
 #endif
@@ -110,7 +116,8 @@ UavcanNode::UavcanNode(uavcan::ICanDriver &can_driver, uavcan::ISystemClock &sys
 	_master_timer(_node),
 	_param_getset_client(_node),
 	_param_opcode_client(_node),
-	_param_restartnode_client(_node)
+	_param_restartnode_client(_node),
+	_hwesc_telemetry(_node)
 {
 	int res = pthread_mutex_init(&_node_mutex, nullptr);
 
@@ -119,6 +126,7 @@ UavcanNode::UavcanNode(uavcan::ICanDriver &can_driver, uavcan::ISystemClock &sys
 	}
 
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
+	_mixing_interface_hwesc.mixingOutput().setMaxTopicUpdateRate(1000000 / UavcanHwescController::MAX_RATE_HZ);	//added mixing interface for hwesc
 	_mixing_interface_esc.mixingOutput().setMaxTopicUpdateRate(1000000 / UavcanEscController::MAX_RATE_HZ);
 	_mixing_interface_servo.mixingOutput().setMaxTopicUpdateRate(1000000 / UavcanServoController::MAX_RATE_HZ);
 #endif
@@ -413,7 +421,13 @@ void
 UavcanNode::update_params()
 {
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
-	_mixing_interface_esc.updateParams();
+	int32_t uavcan_esc_protocol = 1;
+	param_get(param_find("UAVCAN_ESC_PROTO"), &uavcan_esc_protocol);
+	if (uavcan_esc_protocol != 0) {
+		_mixing_interface_hwesc.updateParams();
+	} else {
+		_mixing_interface_esc.updateParams();
+	}
 	_mixing_interface_servo.updateParams();
 #endif
 }
@@ -449,8 +463,15 @@ UavcanNode::start(uavcan::NodeID node_id, uint32_t bitrate)
 
 	_instance->ScheduleOnInterval(ScheduleIntervalMs * 1000);
 
+	int32_t uavcan_esc_protocol = 1;
+	param_get(param_find("UAVCAN_ESC_PROTO"), &uavcan_esc_protocol);
+
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
-	_instance->_mixing_interface_esc.ScheduleNow();
+	if (uavcan_esc_protocol != 0) {
+		_instance->_mixing_interface_hwesc.ScheduleNow();
+	} else {
+		_instance->_mixing_interface_esc.ScheduleNow();
+	}
 	_instance->_mixing_interface_servo.ScheduleNow();
 #endif
 
@@ -527,14 +548,31 @@ UavcanNode::init(uavcan::NodeID node_id, UAVCAN_DRIVER::BusEvent &bus_events)
 
 #endif
 
+	// HWESC Telemetry Init
+	int32_t uavcan_esc_protocol = 1;
+	param_get(param_find("UAVCAN_ESC_PROTO"), &uavcan_esc_protocol);
+
+	if (uavcan_esc_protocol != 0) {
+		ret = _hwesc_telemetry.init();
+
+		if (ret < 0) {
+			return ret;
+		}
+	}
+
 	// Actuators
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
-	ret = _esc_controller.init();
+	if(uavcan_esc_protocol != 0) {
+		// Init Hobbywing ESC Control if UAVCAN_ESC_PROTO is non-zero
+		ret = _hwesc_controller.init();
+	} else {
+		// Init Standard UAVCAN ESC Control if UAVCAN_ESC_PROTO is zero
+		ret = _esc_controller.init();
+	}
 
 	if (ret < 0) {
 		return ret;
 	}
-
 #endif
 
 #if defined(CONFIG_UAVCAN_HARDPOINT_CONTROLLER)
@@ -969,9 +1007,12 @@ UavcanNode::Run()
 	if (_task_should_exit.load()) {
 
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
+		// Added hwesc mixing interface cleanup
+		_mixing_interface_hwesc.mixingOutput().unregister();
+		_mixing_interface_hwesc.ScheduleClear();
+
 		_mixing_interface_esc.mixingOutput().unregister();
 		_mixing_interface_esc.ScheduleClear();
-
 		_mixing_interface_servo.mixingOutput().unregister();
 		_mixing_interface_servo.ScheduleClear();
 #endif
@@ -1076,6 +1117,35 @@ void UavcanNode::publish_node_statuses()
 }
 
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
+bool UavcanMixingInterfaceHWESC::updateOutputs(uint16_t outputs[MAX_ACTUATORS], unsigned num_outputs,
+		unsigned num_control_groups_updated)
+{
+	_hwesc_controller.update_outputs(outputs, num_outputs);
+	return true;
+}
+
+void UavcanMixingInterfaceHWESC::Run()
+{
+	pthread_mutex_lock(&_node_mutex);
+	_mixing_output.update();
+	_mixing_output.updateSubscriptions(false);
+	pthread_mutex_unlock(&_node_mutex);
+}
+
+void UavcanMixingInterfaceHWESC::mixerChanged()
+{
+	int rotor_count = 0;
+
+	for (unsigned i = 0; i < MAX_ACTUATORS; ++i) {
+		rotor_count += _mixing_output.isFunctionSet(i);
+
+		if (i < esc_status_s::CONNECTED_ESC_MAX) {
+			_hwesc_telemetry.esc_status().esc[i].actuator_function = (uint8_t)_mixing_output.outputFunction(i);
+		}
+	}
+	_hwesc_controller.set_rotor_count(rotor_count);
+}
+
 bool UavcanMixingInterfaceESC::updateOutputs(uint16_t outputs[MAX_ACTUATORS], unsigned num_outputs,
 		unsigned num_control_groups_updated)
 {
@@ -1162,6 +1232,15 @@ UavcanNode::print_info()
 	printf("\n");
 
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
+	// Print hwesc status if at least one channel is enabled
+	for (int i = 0; i < OutputModuleInterface::MAX_ACTUATORS; i++) {
+		if (_mixing_interface_hwesc.mixingOutput().isFunctionSet(i)) {
+			printf("HWESC outputs:\n");
+			_mixing_interface_hwesc.mixingOutput().printStatus();
+			printf("\n");
+			break;
+		}
+	}
 
 	// Print esc status if at least one channel is enabled
 	for (int i = 0; i < OutputModuleInterface::MAX_ACTUATORS; i++) {

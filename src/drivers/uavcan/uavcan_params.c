@@ -436,3 +436,27 @@ PARAM_DEFINE_INT32(UAVCAN_SUB_RNG, 0);
  * @group UAVCAN
  */
 PARAM_DEFINE_INT32(UAVCAN_SUB_BTN, 0);
+
+/**
+* Select UAVCAN ESC Protocol.
+*
+* 0 - Use Standard DroneCAN ESC Communication Protocol
+* uavcan::equipment::esc::Status
+* uavcan::equipment::esc::RawCommand
+*
+* 1 - Use UAVCAN Hobbywing ESC Communication Protocol
+* com::hobbywing::esc::GetEscID
+* com::hobbywing::esc::StatusMsg1
+* com::hobbywing::esc::StatusMsg2
+* com::hobbywing::esc::StatusMsg3
+* com::hobbywing::esc::RawCommand
+*
+* @min 0
+* @max 1
+* @value 0 Standard UAVCAN ESC
+* @value 1 Hobbywing UAVCAN ESC
+* @boolean
+* @reboot_required true
+* @group UAVCAN
+*/
+PARAM_DEFINE_INT32(UAVCAN_ESC_PROTO, 0);
