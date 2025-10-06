@@ -218,7 +218,7 @@ UavcanHwescController::finalize_mapping_window()
 
 	bool mapping_ok = true;
 
-	// check get esc id responses against flags from the pre-mapping
+	// check get esc id responses against flags frosm the pre-mapping
 	for (unsigned i = 0; i < MAX_ACTUATORS; ++i) {
 		ESCStatus &esc = _esc_data[i];
 
@@ -715,7 +715,7 @@ uint16_t statusflags_to_failures(uint16_t status_flags) {
 		count++;
 	}
 	// Skip Bit 3: Positioning for now FAILURE_GENERIC maybe later
-	// Skip Bit 4: Throttle Lost for now, FAILURE_GENERIC maybe later
+	// Ship Bit 4: Throttle Lost for now, FAILURE_GENERIC maybe later
 	// Skip Bit 5: Throttle Not Reset to Zero for now, INCONSISTENT_CMD maybe later
 	// Bit 6: MOS Overheating -> FAILURE_OVER_ESC_TEMPERATURE
 	if (status_flags & (1 << 6)) {
