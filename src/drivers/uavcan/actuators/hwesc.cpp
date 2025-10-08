@@ -72,7 +72,6 @@ UavcanHwescController::UavcanHwescController(uavcan::INode &node) :
  *
  * Subscribe to StatusMsg1, and StatusMsg2 messages
  *
- *
  * @return	OK on success, negative errno on failure
  */
 int
@@ -108,6 +107,11 @@ UavcanHwescController::init()
 	return OK;
 }
 
+/**
+ * Check if the given esc index is configured as a can_throttle esc
+ *
+ * Read only function
+ */
 bool
 UavcanHwescController::is_can_throttle(uint8_t esc_index) const
 {
@@ -121,12 +125,6 @@ UavcanHwescController::is_can_throttle(uint8_t esc_index) const
 
 	int32_t fn = 0;
 	if (param_get(_param_handles[esc_index], &fn) == 0 && fn > 0) {
-		// Yes, we do learn that the esc is can controlled.
-		// Also, hobbywing ESCs are usually for rotors.
-		// For a quadcopter, Motor1-4 function values are: 101-104
-		// At the hobbywing throttle channel side we expect 1-4
-		// Which correspond to the esc index from 0-3.
-		// TODO: Compare esc index with function value too.
 		return true;
 	}
 
@@ -136,40 +134,53 @@ UavcanHwescController::is_can_throttle(uint8_t esc_index) const
 /**
  * Map and Assign all ESCs Once AFTER init.
  *
+ * Reset previous mapping data
+ *
  * Set configured ESCs on ESCStatus can_throttle flag according to _param_handles[]
  *
  * Call GetEscID service client
- *
- * If can_throttle flags for ESCs are false,
- * only map esc_index to node_id with GetEscID responses.
- *
- * If can_throttle flags for ESCs are true, check all escs are mapped,
- * Handle errors if can_throttle flags do not align with responses
- * Also don't allow arming, inform user via PX4_ERR or WARN.
  */
 void
 UavcanHwescController::map_and_assign_all_once()
 {
 	const hrt_abstime now = hrt_absolute_time();
 
-	if (_mapping_in_progress || !_reinit_requested) {
+	// Don't reinit if already in progress or not requested
+	if (_mapping_in_progress || !_reinit_requested || _armed) {
 		return;
 	}
 
+	// Don't reinit if last attempt was too recent
 	if (hrt_elapsed_time(&_last_esc_id_query) < GET_ESCID_COOLDOWN_US) {
 		return;
 	}
 
+	_can_control_ready = false;
+
+	// pre-mapping uses user configuration before get esc id responses
+	// how many escs are expected according to configuration and how many of them are can_throttle
 	for (unsigned i = 0; i < MAX_ACTUATORS; ++i) {
 		ESCStatus &esc = _esc_data[i];
-		esc.can_throttle = is_can_throttle(i);
-		esc.is_expected = esc.can_throttle || (i < _rotor_count);
+
+		// This function might be requested in runtime, reset previous mapping data
+		// Especially node id, since get esc id responses may assume duplicate
+		esc.node_id = kInvalidNID;
+		esc.last_seen_us = 0;
+		esc.msg1_received = false;
+		esc.msg2_received = false;
+		esc.active = false;
+
+		esc.can_throttle = is_can_throttle(i);				// Is rotor configured as a HWESC can throttle by UAVCAN_EC_FUNCx and UAVCAN_HWESC_PROTO params.
+		esc.is_expected = esc.can_throttle || (i < _rotor_count);	// Is rotor expected according to either can_throttle or rotor count -> based on Mixing Class and UAVCAN_HWESC_PROTO
 		esc.duplicate_mapping = false;
-		esc.timestamp_get_esc_id = 0;
+		esc.timestamp_get_esc_id = 0;					// This is checked inside finalize_mapping_window(), so reset it here.
+
 	}
 
+	// call get esc id service
 	int res = get_esc_id_req();
 
+	// service call failed due to CAN driver issues
 	if (res < 0) {
 		if (res != -EAGAIN) {
 			error_handler(ESC_ERROR_GETESCID_FAIL, 0, res);
@@ -178,13 +189,26 @@ UavcanHwescController::map_and_assign_all_once()
 		return;
 	}
 
+	// service call ok, update last query time
+	// and notify mapping in progress
 	_mapping_in_progress = true;
+	// deadline for all get esc id responses is 0.2 s from now.
 	_mapping_deadline_us = now + MAPPING_COLLECTION_WINDOW_US;
 }
 
+/**
+ * Finalize the mapping window after collecting GetEscID responses
+ *
+ * Check for duplicate mappings
+ *
+ * Check for expected escs that did not respond
+ *
+ * Clear reinit request flag if mapping ok, otherwise set it to try again later
+ */
 void
 UavcanHwescController::finalize_mapping_window()
 {
+	// Don't proceed if mapping is not in progress
 	if (!_mapping_in_progress) {
 		return;
 	}
@@ -194,29 +218,66 @@ UavcanHwescController::finalize_mapping_window()
 
 	bool mapping_ok = true;
 
+	// check get esc id responses against flags from the pre-mapping
 	for (unsigned i = 0; i < MAX_ACTUATORS; ++i) {
 		ESCStatus &esc = _esc_data[i];
 
+		// check for duplicate mappings
+		// this is a configuration error
 		if (esc.duplicate_mapping) {
 			mapping_ok = false;
 		}
 
+		// check for expected escs that did not respond
 		const bool responded = esc.timestamp_get_esc_id != 0;
 
+		// for can throttle escs -> drone should not arm if mapping not ok
 		if (esc.can_throttle && !responded) {
 			error_handler(ESC_ERROR_MISMATCHED_ESC_CONFIG, i, -1);
 			mapping_ok = false;
-		} else if (esc.is_expected && !responded) {
+		}
+		// for non-can throttle escs -> warn only
+		else if (esc.is_expected && !responded) {
 			error_handler(ESC_WARN_MISSING_ESC, i, -1);
 		}
 	}
 
+	// drone can be armed if mapping_ok. note that we set can_control_ready based on
+	// can_throttle && responded only. PWM motors are irrelevant.
+	_can_control_ready = mapping_ok;
+
+	// Setting _reinit_requested flag here is safe. Drone should already be disarmed in order to get here.
+	// If drone is disarmed, it is safe to try mapping again later if not ok
+
+	// If OK, clear reinit request flag
+	// If not OK, set reinit request flag to try again later
 	_reinit_requested = !mapping_ok;
+}
+
+bool
+UavcanHwescController::has_duplicate_node_id(uint8_t nid, uint8_t exclude_idx) const
+{
+	for (unsigned i = 0; i < MAX_ACTUATORS; ++i) {
+		if (i == exclude_idx) {
+			continue;
+		}
+
+		const ESCStatus &esc = _esc_data[i];
+
+		if (esc.node_id == nid) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 void
 UavcanHwescController::update_outputs(uint16_t outputs[MAX_ACTUATORS], unsigned total_outputs)
 {
+	if (!_can_control_ready) {
+		return;
+	}
 	// TODO: configurable rate limit
 	const auto timestamp = _node.getMonotonicTime();
 
@@ -320,10 +381,27 @@ void
 UavcanHwescController::periodic_update(const uavcan::TimerEvent &) {
        	const hrt_abstime now = hrt_absolute_time();
 
-	if (_reinit_requested && !_mapping_in_progress) {
+	// Check if drone is armed globally
+	if (_actuator_armed_sub.updated()) {
+		actuator_armed_s actuator_armed;
+		if (_actuator_armed_sub.copy(&actuator_armed)) {
+			if (actuator_armed.armed != _armed) {
+				_armed = actuator_armed.armed;
+				PX4_INFO("Actuator armed state changed: %s", _armed ? "ARMED" : "DISARMED");
+			}
+		}
+	}
+
+	// If reinit requested and not already in progress, start process
+	if (_reinit_requested && !_mapping_in_progress && !_armed) {
 		map_and_assign_all_once();
 	}
 
+	// We require to call finalize_mapping_window() here as well.
+	// Even though it is called in get_esc_id_cb() when all expected escs are mapped.
+	// Because, if the mapping window deadline passed and the last ESC don't reply, try finalize mapping after deadline.
+	// This is to avoid waiting indefinitely if some expected escs are missing.
+	// finalize_mapping_window() will not be called if mapping is not in progress.
 	if (_mapping_in_progress && _mapping_deadline_us != 0 && now >= _mapping_deadline_us) {
 		finalize_mapping_window();
 	}
@@ -331,54 +409,71 @@ UavcanHwescController::periodic_update(const uavcan::TimerEvent &) {
        	check_timeouts();			// Check for message timeouts and update active flags
 
 	maybe_publish_esc_status();		// Publish esc_status uORB
+	//maybe_publish_esc_hw_status();	// Publish surplus esc data
 }
 
 /**
  * Check for message timeouts and update active flags
  *
+ * Only job is to update active flags based on timeouts
+ * MSG1 timeout drives active flag
+ * MSG2 timeout is informational only
  */
 void
 UavcanHwescController::check_timeouts()
 {
-    const uint64_t now = hrt_absolute_time();
+	const uint64_t now = hrt_absolute_time();
 
-    // Rate limit the scan
-    if (_last_timeout_check != 0 && (now - _last_timeout_check) < CHECK_TIMEOUTS_MIN_US) {
-        return;
-    }
-    _last_timeout_check = now;
+	// Rate limit the scan
+	if (_last_timeout_check != 0 && (now - _last_timeout_check) < CHECK_TIMEOUTS_MIN_US) {
+		return;
+	}
 
-    const bool in_boot_grace = (now - _boot_time_us) < BOOT_GRACE_US;
+	const bool in_boot_grace = (now - _boot_time_us) < BOOT_GRACE_US;
 
-    for (int i = 0; i < MAX_ACTUATORS; ++i) {
-        auto &esc = _esc_data[i];
+	if (in_boot_grace) {
+		// During boot grace period, don't mark anything inactive
 
-        // --- Stale flags (these don't decide 'active', just hygiene) ---
-        if (esc.msg1_received && (now - esc.timestamp_msg1) > TIMEOUT_MSG1_US) {
-            esc.msg1_received = false;
-        }
-        if (esc.msg2_received && (now - esc.timestamp_msg2) > TIMEOUT_MSG2_US) {
-            esc.msg2_received = false;
-        }
+		// but also don't forget to assign last timeout check time to avoid polling too often
+		_last_timeout_check = now;
+		return;
+	}
 
-        // --- Heartbeat (online) policy: MSG1 drives 'active' ---
-        const bool msg1_fresh = (esc.timestamp_msg1 != 0) && ((now - esc.timestamp_msg1) <= TIMEOUT_MSG1_US);
+	_last_timeout_check = now;
 
-        if (!msg1_fresh) {
-            // During boot grace we avoid instantly declaring inactive
-            if (!in_boot_grace) {
-                if (esc.active) {
-                    esc.active = false;
-                    PX4_WARN("ESC %d (node %u) inactive (MSG1 timeout)", i, esc.node_id);
-                }
-            }
-        } else {
-            if (!esc.active) {
-                esc.active = true;
-                PX4_INFO("ESC %d (node %u) active (MSG1 fresh)", i, esc.node_id);
-            }
-        }
-    }
+	for (int i = 0; i < MAX_ACTUATORS; ++i) {
+		auto &esc = _esc_data[i];
+
+		// --- Stale flags (these don't decide 'active', just hygiene) ---
+		if (esc.msg1_received && (now - esc.timestamp_msg1) > TIMEOUT_MSG1_US) {
+		esc.msg1_received = false;
+		}
+		if (esc.msg2_received && (now - esc.timestamp_msg2) > TIMEOUT_MSG2_US) {
+		esc.msg2_received = false;
+		}
+		//if (esc.msg3_received && (now - esc.timestamp_msg3) > TIMEOUT_MSG3_US) {
+		//    esc.msg3_received = false;
+		//}
+
+		// --- Heartbeat (online) policy: MSG1 drives 'active' ---
+		const bool msg1_fresh = (esc.timestamp_msg1 != 0) && ((now - esc.timestamp_msg1) <= TIMEOUT_MSG1_US);
+
+		if (!msg1_fresh) {
+		if (esc.active) {
+			// Mark inactive
+			esc.active = false;
+			// Transition logging
+			PX4_WARN("ESC %d (node %u) inactive (MSG1 timeout)", i, esc.node_id);
+		}
+		} else {
+		if (!esc.active) {
+			// Mark active
+			esc.active = true;
+			// Transition logging
+			PX4_INFO("ESC %d (node %u) active (MSG1 fresh)", i, esc.node_id);
+		}
+		}
+	}
 }
 
 /**
@@ -392,6 +487,7 @@ UavcanHwescController::check_timeouts()
 int
 UavcanHwescController::get_esc_id_req()
 {
+	// Rate limit the requests with _last_esc_id_query
 	if (hrt_elapsed_time(&_last_esc_id_query) < GET_ESCID_COOLDOWN_US) {
 		return -EAGAIN;
 	}
@@ -401,10 +497,8 @@ UavcanHwescController::get_esc_id_req()
 	int res = _get_esc_id_client.call(0, req);
 
 	if (res >= 0) {
+		// if call succeeded, also update last query time
 		_last_esc_id_query = hrt_absolute_time();
-	} else {
-		PX4_ERR("Hobbywing GetEscID request failed: %d", res);
-		// TODO: retry logic and additional error handling.
 	}
 
 	return res;
@@ -419,8 +513,13 @@ UavcanHwescController::get_esc_id_req()
 */
 void
 UavcanHwescController::get_esc_id_cb(const uavcan::ServiceCallResult<com::hobbywing::esc::GetEscID> &result) {
-    	if (!result.isSuccessful()) return error_handler(ESC_ERROR_GETESCID_FAIL, 0, result.getError());
-	// get node id and throttle channel
+    	if (!result.isSuccessful()) {
+		error_handler(ESC_ERROR_GETESCID_FAIL, 0, result.getError());
+		return;
+	}
+	// get node id and esc index from response.
+
+	// received node id is checked if invalid.
     	const uint8_t nid = result.getCallID().server_node_id.get();
     	if (nid == 0 || nid >= 0x7E) return; 	// TODO: Replace with a function that checks for valid node IDs and handle errors
 
@@ -429,14 +528,19 @@ UavcanHwescController::get_esc_id_cb(const uavcan::ServiceCallResult<com::hobbyw
 		return;
 	}
 
+	// received throttle channel is checked if invalid, then esc index is retrieved.
     	const uint8_t idx = throttle_ch2esc_index(result.getResponse().throttle_channel);
     	if (idx == kInvalidIdx) {
-		return error_handler(ESC_ERROR_INVALID_THROTTLE_CH, nid, -1);
+		error_handler(ESC_ERROR_INVALID_THROTTLE_CH, nid, -1);
         	// PX4_WARN("GetEscID bad channel from node %u", nid);
+		return;
     	}
 
     	ESCStatus &esc = _esc_data[idx];
 
+	// Duplicate mappings - TYPE I: two escs claiming the same esc index.
+	// To check for duplicate mappings, check if the esc index already has a node id assigned
+	// and if the assigned node id is different than the newly received node id.
 	if (esc.node_id != kInvalidNID && esc.node_id != nid) {
 		if (!esc.duplicate_mapping) {
 			esc.duplicate_mapping = true;
@@ -444,24 +548,39 @@ UavcanHwescController::get_esc_id_cb(const uavcan::ServiceCallResult<com::hobbyw
 		}
 		return;
 	}
+	// Duplicate mappings - TYPE II: two escs claiming the same node id.
+	if (has_duplicate_node_id(nid, idx)) {
+		if (!esc.duplicate_mapping) {
+			esc.duplicate_mapping = true;
+			error_handler(ESC_ERROR_DUPLICATE_MAPPING, idx, -1);
+		}
+		return;
+	}
 
+	// Assign node id to esc index
+	// Set other flags and timestamps
 	esc.node_id     = nid;
 	esc.is_hobbywing = true; // might need it later, will assign it regardless
+	esc.active      = true; // active upon mapping, will be updated by timeouts
 	esc.last_seen_us = hrt_absolute_time();
 	esc.duplicate_mapping = false;
 	esc.timestamp_get_esc_id = hrt_absolute_time();
 
+	// If mapping in progress, check if all expected escs are mapped and finalize if so
 	if (_mapping_in_progress) {
 		bool all_expected_mapped = true;
 
 		for (unsigned i = 0; i < MAX_ACTUATORS; ++i) {
+			// If there are still escs expected but not yet mapped, continue waiting.
 			if (_esc_data[i].is_expected && _esc_data[i].timestamp_get_esc_id == 0) {
 				all_expected_mapped = false;
+				// break and wait for next callback
 				break;
 			}
 		}
 
 		if (all_expected_mapped) {
+			// Move to finalize mapping if all expected escs are mapped
 			finalize_mapping_window();
 		}
 	}
@@ -473,10 +592,17 @@ UavcanHwescController::get_esc_id_cb(const uavcan::ServiceCallResult<com::hobbyw
  */
 void
 UavcanHwescController::status_msg1_sub_cb(const uavcan::ReceivedDataStructure<com::hobbywing::esc::StatusMsg1> &msg) {
+	if (_mapping_in_progress) {
+		// During mapping, ignore status messages
+		return;
+	}
 	// Find esc index from node id
 	const uint8_t idx = fetch_node_esc_index(msg.getSrcNodeID().get());
 	// Not found, might be a new esc, return invalid index and request reinit.
-	if (idx == kInvalidIdx) return error_handler(ESC_ERROR_INVALID_INDEX, msg.getSrcNodeID().get(), -1);
+	if (idx == kInvalidIdx) {
+		error_handler(ESC_ERROR_INVALID_INDEX, msg.getSrcNodeID().get(), -1);
+		return;
+	}
 
 	// Get the ESC status reference
 	auto &esc = _esc_data[idx];
@@ -500,6 +626,10 @@ UavcanHwescController::status_msg1_sub_cb(const uavcan::ReceivedDataStructure<co
  */
 void
 UavcanHwescController::status_msg2_sub_cb(const uavcan::ReceivedDataStructure<com::hobbywing::esc::StatusMsg2> &msg) {
+	if (_mapping_in_progress) {
+		// During mapping, ignore status messages
+		return;
+	}
 	const uint8_t idx = fetch_node_esc_index(msg.getSrcNodeID().get());
 	if (idx == kInvalidIdx) return;
 	auto &esc = _esc_data[idx];
@@ -585,7 +715,7 @@ uint16_t statusflags_to_failures(uint16_t status_flags) {
 		count++;
 	}
 	// Skip Bit 3: Positioning for now FAILURE_GENERIC maybe later
-	// Ship Bit 4: Throttle Lost for now, FAILURE_GENERIC maybe later
+	// Skip Bit 4: Throttle Lost for now, FAILURE_GENERIC maybe later
 	// Skip Bit 5: Throttle Not Reset to Zero for now, INCONSISTENT_CMD maybe later
 	// Bit 6: MOS Overheating -> FAILURE_OVER_ESC_TEMPERATURE
 	if (status_flags & (1 << 6)) {
@@ -668,6 +798,10 @@ uint16_t statusflags_to_failures(uint16_t status_flags) {
 void
 UavcanHwescController::maybe_publish_esc_status()
 {
+	if (_mapping_in_progress) {
+		// During mapping, ignore status messages
+		return;
+	}
 	// Publish MSG1 and MSG2 data to esc_status uORB topic whenever possible.
 	esc_status_s status{};
 	status.timestamp = hrt_absolute_time();
@@ -687,6 +821,8 @@ UavcanHwescController::maybe_publish_esc_status()
 		auto &ref = status.esc[i];
 
 		if (online) {
+		++online_count;
+
 		ref.timestamp       = status.timestamp;
 		ref.esc_address     = e.node_id;
 		ref.esc_voltage     = e.voltage_mv * 0.1f;
@@ -698,9 +834,10 @@ UavcanHwescController::maybe_publish_esc_status()
 		ref.esc_errorcount  = 0;		// TODO: add error count if available
 
 		status.esc_online_flags |= (1u << i);
-		status.esc_armed_flags  |= (1u << i);
+		status.esc_armed_flags  |= (1u << i);	// TODO: decide how to manage armed flags for can escs apart from online only
+		} else {
 
-		++online_count;
+
 		}
 
 		// Clear edge flags for next cycle after publishing so don't report same data again.
@@ -738,35 +875,48 @@ UavcanHwescController::is_banned_node(uint8_t node_id) const
 int
 UavcanHwescController::error_handler(uint8_t error_type, uint8_t val, int res)
 {
+	static int error_count = 0;
+	static hrt_abstime last_error_time = 0;
+
 	if (res >= 0) {
 		return OK; // no error to handle
 	}
 
 	int ret = res;
 
+	bool try_reinit = false;
+
+	error_count++;
+
+	// TODO: implement error counter to avoid spamming the logs + stop trying to reinit if too many errors
+	// reset counter if no errors for a while
+
+	const hrt_abstime now = hrt_absolute_time();
+
 	switch (error_type) {
 	case ESC_ERROR_INVALID_INDEX:
+		// Rate limit the warnings
+		// Because this error might be called multiple times for the same unknown node id
 		if (hrt_elapsed_time(&_last_invalid_index_warn) > WARN_THROTTLE_INTERVAL_US) {
 			_last_invalid_index_warn = hrt_absolute_time();
 			PX4_WARN("Unknown ESC node ID %u, requesting remap", val);
 		}
-		_reinit_requested = true;
-		ret = get_esc_id_req();
+		try_reinit = true;
 		break;
 
 	case ESC_ERROR_INVALID_THROTTLE_CH:
 		PX4_WARN("GetEscID invalid throttle channel from node %u", val);
-		_reinit_requested = true;
+		try_reinit = true;
 		break;
 
 	case ESC_ERROR_DUPLICATE_MAPPING:
 		PX4_WARN("Duplicate GetEscID mapping on ESC index %u", val);
-		_reinit_requested = true;
+		try_reinit = true;
 		break;
 
 	case ESC_ERROR_MISMATCHED_ESC_CONFIG:
 		PX4_WARN("ESC index %u configured for CAN but no node mapped", val);
-		_reinit_requested = true;
+		try_reinit = true;
 		break;
 
 	case ESC_WARN_MISSING_ESC:
@@ -775,29 +925,42 @@ UavcanHwescController::error_handler(uint8_t error_type, uint8_t val, int res)
 
 	case ESC_ERROR_GETESCID_FAIL:
 		PX4_ERR("GetEscID request failed (%d)", res);
-		_reinit_requested = true;
+		try_reinit = true;
 		break;
 
 	case ESC_ERROR_GETESCID_TIMEOUT:
 		PX4_WARN("GetEscID request timed out");
-		_reinit_requested = true;
+		try_reinit = true;
 		break;
 
 	case ESC_ERROR_UNEXPECTED_NODEID:
 		PX4_WARN("Unexpected node id %u in GetEscID response", val);
-		_reinit_requested = true;
+		try_reinit = true;
 		break;
 
 	case ESC_ERROR_UNEXPECTED_ESC_COUNT:
 		PX4_WARN("Unexpected ESC count during mapping");
-		_reinit_requested = true;
+		try_reinit = true;
 		break;
 
 	default:
 		break;
 	}
 
-	return ret;
+	if (try_reinit) {
+		// check if armed first before requesting reinit
+		// if armed, don't request reinit, just return error
+		if (_armed) {
+			PX4_WARN("Cannot reinitialize Hobbywing ESCs while armed");
+		} else {
+			_reinit_requested = true;
+			ret = _reinit_requested; // indicate to caller that reinit is requested
+		}
+	}
+
+	// TODO: standardize error handling return values for the module
+	// for now, return OK
+	return OK;
 }
 
 // later on add logic for maintenance info. void esc_maintenance_res_cb(const uavcan::ServiceCallResult<com::hobbywing::esc::GetMaintenanceInformation> &msg) { }
