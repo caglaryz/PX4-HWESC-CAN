@@ -117,7 +117,6 @@ UavcanNode::UavcanNode(uavcan::ICanDriver &can_driver, uavcan::ISystemClock &sys
 	_param_getset_client(_node),
 	_param_opcode_client(_node),
 	_param_restartnode_client(_node),
-	_hwesc_telemetry(_node)
 {
 	int res = pthread_mutex_init(&_node_mutex, nullptr);
 
@@ -463,7 +462,7 @@ UavcanNode::start(uavcan::NodeID node_id, uint32_t bitrate)
 
 	_instance->ScheduleOnInterval(ScheduleIntervalMs * 1000);
 
-	int32_t uavcan_esc_protocol = 1;
+	int32_t uavcan_esc_protocol = 0;
 	param_get(param_find("UAVCAN_ESC_PROTO"), &uavcan_esc_protocol);
 
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
@@ -548,25 +547,12 @@ UavcanNode::init(uavcan::NodeID node_id, UAVCAN_DRIVER::BusEvent &bus_events)
 
 #endif
 
-	// HWESC Telemetry Init
-	int32_t uavcan_esc_protocol = 1;
-	param_get(param_find("UAVCAN_ESC_PROTO"), &uavcan_esc_protocol);
-
-	if (uavcan_esc_protocol != 0) {
-		ret = _hwesc_telemetry.init();
-
-		if (ret < 0) {
-			return ret;
-		}
-	}
-
 	// Actuators
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
+	/* Init Hobbywing ESC Control if UAVCAN_ESC_PROTO is non-zero */
 	if(uavcan_esc_protocol != 0) {
-		// Init Hobbywing ESC Control if UAVCAN_ESC_PROTO is non-zero
 		ret = _hwesc_controller.init();
 	} else {
-		// Init Standard UAVCAN ESC Control if UAVCAN_ESC_PROTO is zero
 		ret = _esc_controller.init();
 	}
 
@@ -1132,6 +1118,7 @@ void UavcanMixingInterfaceHWESC::Run()
 	pthread_mutex_unlock(&_node_mutex);
 }
 
+// Even if PWM or CAN regardless, rotor count is based on mixer functions and can be used in
 void UavcanMixingInterfaceHWESC::mixerChanged()
 {
 	int rotor_count = 0;
@@ -1140,7 +1127,7 @@ void UavcanMixingInterfaceHWESC::mixerChanged()
 		rotor_count += _mixing_output.isFunctionSet(i);
 
 		if (i < esc_status_s::CONNECTED_ESC_MAX) {
-			_hwesc_telemetry.esc_status().esc[i].actuator_function = (uint8_t)_mixing_output.outputFunction(i);
+			_hwesc_controller.esc_status().esc[i].actuator_function = (uint8_t)_mixing_output.outputFunction(i);
 		}
 	}
 	_hwesc_controller.set_rotor_count(rotor_count);
