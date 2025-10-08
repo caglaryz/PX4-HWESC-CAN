@@ -148,7 +148,6 @@ private:
 	friend class UavcanNode;
 	pthread_mutex_t &_node_mutex;
 	UavcanHwescController &_hwesc_controller;
-	UavcanHwescTelemetry  &_hwesc_telemetry;
 	MixingOutput _mixing_output{"UAVCAN_EC", UavcanHwescController::MAX_ACTUATORS, *this, MixingOutput::SchedulingPolicy::Auto, false, false};
 };
 class UavcanMixingInterfaceESC : public OutputModuleInterface
