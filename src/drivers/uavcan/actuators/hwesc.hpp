@@ -139,17 +139,22 @@ private:
 
 	bool _can_control_ready{false};		// < whether the system is ready for CAN control (set to true if PWM regardless for now)
 
+	bool _telem_ok{false};			// < whether telemetry is OK to publish
+
 	// Enum for error types
  	enum EscErrorType {
-		ESC_ERROR_INVALID_INDEX = 0,	// invalid esc index for a given node id
-		ESC_WARN_MISSING_ESC,		// expected esc (configured or rotor count) missing
-		ESC_ERROR_GETESCID_FAIL,	// GetEscID service call failed
-		ESC_ERROR_GETESCID_TIMEOUT,	// GetEscID service call timeout
-		ESC_ERROR_UNEXPECTED_NODEID,	// GetEscID returned unexpected node id
-		ESC_ERROR_MISMATCHED_ESC_CONFIG, // ESC configured as can_throttle but no response or vice versa
-		ESC_ERROR_UNEXPECTED_ESC_COUNT,  // More ESCs responded than configured
-		ESC_ERROR_INVALID_THROTTLE_CH,  // Invalid throttle channel in UAVCAN_EC_FUNCx parameter
-		ESC_ERROR_DUPLICATE_MAPPING,	// Duplicate node id mapped to same esc index
+		HWESC_OK = 0,
+		HWESC_DUPLICATE_INDEX,		// multiple escs responded with same throttle channel in GetEscID
+		HWESC_INVALID_INDEX,		// invalid esc index in GetEscID response
+		HWESC_UNEXPECTED_INDEX,		// ch > rotor_count when rotor_count is used as hard expectation
+		HWESC_DUPLICATE_ADDR,		// multiple escs responded with same node id
+		HWESC_INVALID_ADDR,		// banned node id
+		HWESC_UNDISC_ADDR,		// runtime message from an unmapped node/esc
+		HWESC_MISSING_ESC,		// expected index not seen in mapping window
+		HWESC_MISSING_ESC_WARN,		// expected index not seen in mapping window - warn only
+		HWESC_MAP_FAILED,		// GetEscID call error
+		HWESC_MAP_TIMEOUT,		// no mapping responses within window
+		HWESC_MSG_TIMEOUT,		// runtime MSG1/2 timeout after previously mapped
 		// TODO: add errors related to expected escs not initialized/mapped
 	};
 
@@ -159,11 +164,11 @@ private:
 	uint16_t _status_counter{0};						// < internal counter for esc status topic
 
 	static constexpr uint64_t BOOT_GRACE_US            = 2'000'000;  		// after boot/mapping, don't mark inactive too early
-	static constexpr uint64_t TIMEOUT_MSG1_US          = 2'000'000;  		// heartbeat (MSG1) timeout
-	static constexpr uint64_t TIMEOUT_MSG2_US          = 3'000'000;  		// slower, informational
+	static constexpr uint64_t TIMEOUT_MSG1_US          = 700'000;  			// heartbeat (MSG1) timeout
+	static constexpr uint64_t TIMEOUT_MSG2_US          = 700'000;  			// slower, informational
 	static constexpr uint64_t CHECK_TIMEOUTS_MIN_US    = 100'000;    		// don't scan too often (10 Hz)
 	static constexpr uint64_t GET_ESCID_COOLDOWN_US    = 1'000'000 / MAX_GET_RATE_HZ;
-	static constexpr uint64_t MAPPING_COLLECTION_WINDOW_US = 200'000; 		// 200 ms window to gather GetEscID responses
+	static constexpr uint64_t MAPPING_COLLECTION_WINDOW_US = 500'000; 		// 500 ms window to gather GetEscID responses
 	static constexpr uint64_t WARN_THROTTLE_INTERVAL_US    = 1'000'000; 		// 1 second
 
 
@@ -182,7 +187,7 @@ private:
 	// void status_msg3_sub_cb(const uavcan::ReceivedDataStructure<com::hobbywing::esc::StatusMsg3> &msg);
 
 	int get_esc_id_req();
-	void get_esc_id_cb(const uavcan::ServiceCallResult<com::hobbywing::esc::GetEscID> &result);
+	void get_esc_id_cb(const uavcan::ReceivedDataStructure<com::hobbywing::esc::GetEscID> &result);
 
 	void map_and_assign_all_once();
 	void finalize_mapping_window();
@@ -212,10 +217,10 @@ private:
 
 	void check_timeouts();
 
-	static inline uint8_t throttle_ch2esc_index(uint8_t ch) {
+	static inline uint8_t 	throttle_ch2esc_index(uint8_t ch) {
 		return (ch >= 1 && ch <= esc_status_s::CONNECTED_ESC_MAX) ? uint8_t(ch - 1) : kInvalidIdx;
 	}
-	static inline uint8_t esc_index2throttle_ch(uint8_t idx) {
+	static inline uint8_t 	esc_index2throttle_ch(uint8_t idx) {
 		return (idx < esc_status_s::CONNECTED_ESC_MAX) ? uint8_t(idx + 1) : 0;
 	}
 
@@ -239,10 +244,14 @@ private:
         //       	void (UavcanHwescController::*)(const uavcan::ReceivedDataStructure<com::hobbywing::esc::StatusMsg3> &) >
         //       	StatusMsg3CbBinder;
 
+	typedef uavcan::MethodBinder < UavcanHwescController *,
+             	void (UavcanHwescController::*)(const uavcan::ReceivedDataStructure<com::hobbywing::esc::GetEscID> &) >
+             	GetEscIDCbBinder;
 
-       	typedef uavcan::MethodBinder < UavcanHwescController *,
-        	void (UavcanHwescController::*)(const uavcan::ServiceCallResult<com::hobbywing::esc::GetEscID> &)>
-		GetEscIDCallback;
+
+       	//typedef uavcan::MethodBinder < UavcanHwescController *,
+        // 	void (UavcanHwescController::*)(const uavcan::ServiceCallResult<com::hobbywing::esc::GetEscID> &)>
+	//	GetEscIDCbBinder;
 
 
        	typedef uavcan::MethodBinder<UavcanHwescController *,
@@ -250,6 +259,7 @@ private:
 	       	TimerCbBinder;
 
 	uint8_t		_rotor_count{0};
+	uint8_t		_uavcan_rotor_count{0};
 
 	esc_status_s	_esc_status{};
 
@@ -263,13 +273,14 @@ private:
 	uavcan::MonotonicTime							_prev_cmd_pub;   	///< rate limiting
 	uavcan::INode								&_node;
 
-	uavcan::ServiceClient<com::hobbywing::esc::GetEscID, GetEscIDCallback> 	_get_esc_id_client;
-
 	uavcan::Publisher<com::hobbywing::esc::RawCommand>			_uavcan_pub_raw_cmd;
 
        	uavcan::Subscriber<com::hobbywing::esc::StatusMsg1, StatusMsg1CbBinder> _sub_status_msg1;
        	uavcan::Subscriber<com::hobbywing::esc::StatusMsg2, StatusMsg2CbBinder> _sub_status_msg2;
        	// uavcan::Subscriber<com::hobbywing::esc::StatusMsg3, StatusMsg3CbBinder> _sub_status_msg3;
+
+	uavcan::Publisher<com::hobbywing::esc::GetEscID>			_pub_get_esc_id;
+	uavcan::Subscriber<com::hobbywing::esc::GetEscID, GetEscIDCbBinder> 	_sub_get_esc_id;
 
 	uavcan::TimerEventForwarder<TimerCbBinder> _timer;
 

@@ -116,7 +116,7 @@ UavcanNode::UavcanNode(uavcan::ICanDriver &can_driver, uavcan::ISystemClock &sys
 	_master_timer(_node),
 	_param_getset_client(_node),
 	_param_opcode_client(_node),
-	_param_restartnode_client(_node),
+	_param_restartnode_client(_node)
 {
 	int res = pthread_mutex_init(&_node_mutex, nullptr);
 
@@ -125,7 +125,7 @@ UavcanNode::UavcanNode(uavcan::ICanDriver &can_driver, uavcan::ISystemClock &sys
 	}
 
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
-	_mixing_interface_hwesc.mixingOutput().setMaxTopicUpdateRate(1000000 / UavcanHwescController::MAX_RATE_HZ);	//added mixing interface for hwesc
+	_mixing_interface_hwesc.mixingOutput().setMaxTopicUpdateRate(1000000 / UavcanHwescController::MAX_CMD_RATE_HZ);	//added mixing interface for hwesc
 	_mixing_interface_esc.mixingOutput().setMaxTopicUpdateRate(1000000 / UavcanEscController::MAX_RATE_HZ);
 	_mixing_interface_servo.mixingOutput().setMaxTopicUpdateRate(1000000 / UavcanServoController::MAX_RATE_HZ);
 #endif
@@ -550,6 +550,9 @@ UavcanNode::init(uavcan::NodeID node_id, UAVCAN_DRIVER::BusEvent &bus_events)
 	// Actuators
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
 	/* Init Hobbywing ESC Control if UAVCAN_ESC_PROTO is non-zero */
+	int32_t uavcan_esc_protocol = 0;
+	param_get(param_find("UAVCAN_ESC_PROTO"), &uavcan_esc_protocol);
+
 	if(uavcan_esc_protocol != 0) {
 		ret = _hwesc_controller.init();
 	} else {

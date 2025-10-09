@@ -50,10 +50,10 @@
 #include <px4_platform_common/atomic.h>
 #include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
 
-// for hobbywing ESC Control and Telemetry
-#include "hwesc.hpp"
-
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
+// for hobbywing ESC Control and Telemetry
+#include "actuators/hwesc.hpp"
+
 #include "actuators/esc.hpp"
 #include "actuators/servo.hpp"
 #endif
@@ -288,9 +288,6 @@ private:
 	uavcan::Node<>			_node;				///< library instance
 	pthread_mutex_t			_node_mutex;
 
-	// HWESC Telemetry
-	UavcanHwescTelemetry		_hwesc_telemetry;
-
 #if defined(CONFIG_UAVCAN_ARMING_CONTROLLER)
 	UavcanArmingStatus		_arming_status_controller;
 #endif
@@ -300,7 +297,7 @@ private:
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
 	// Added Hobbywing ESC Control
 	UavcanHwescController		_hwesc_controller;
-	UavcanMixingInterfaceHWESC 	_mixing_interface_hwesc{_node_mutex, _hwesc_controller, _hwesc_telemetry};
+	UavcanMixingInterfaceHWESC 	_mixing_interface_hwesc{_node_mutex, _hwesc_controller};
 
 	UavcanEscController		_esc_controller;
 	UavcanMixingInterfaceESC 	_mixing_interface_esc{_node_mutex, _esc_controller};

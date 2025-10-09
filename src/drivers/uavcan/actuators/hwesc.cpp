@@ -52,13 +52,14 @@ UavcanHwescController::UavcanHwescController(uavcan::INode &node) :
 	ModuleParams(nullptr),
 	_node(node),
 	_uavcan_pub_raw_cmd(node),
-       	_timer(node),
-       	_get_esc_id_client(node),
-       	_sub_status_msg1(node),
-       	_sub_status_msg2(node)
+	_sub_status_msg1(node),
+	_sub_status_msg2(node),
+	_pub_get_esc_id(node),
+	_sub_get_esc_id(node),
+	_timer(node)
 {
-	_uavcan_pub_raw_cmd.setPriority(uavcan::TransferPriority::NumericallyMin); 	// Highest priority
-
+	_uavcan_pub_raw_cmd.setPriority(uavcan::TransferPriority::NumericallyMin);
+	_pub_get_esc_id.setPriority(uavcan::TransferPriority::NumericallyMin);
 }
 
 /**
@@ -88,9 +89,17 @@ UavcanHwescController::init()
 	for (unsigned i = 0; i < MAX_ACTUATORS; ++i) {
 		snprintf(param_name, sizeof(param_name), "UAVCAN_EC_FUNC%d", i + 1);
 		_param_handles[i] = param_find(param_name);
+
+		int32_t val = 0;
+
+		if (param_get(_param_handles[i], &val) == 0) {
+			if (val > 0) {
+				_uavcan_rotor_count = i + 1;
+			}
+		}
 	}
 
-	int res = _get_esc_id_client.init(GetEscIDCallback(this, &UavcanHwescController::get_esc_id_cb));
+	int res = _sub_get_esc_id.start(GetEscIDCbBinder(this, &UavcanHwescController::get_esc_id_cb));
        	if (res < 0) return res;
 
        	res = _sub_status_msg1.start(StatusMsg1CbBinder(this, &UavcanHwescController::status_msg1_sub_cb));
@@ -103,6 +112,12 @@ UavcanHwescController::init()
        	_timer.startPeriodic(uavcan::MonotonicDuration::fromMSec(1000 / MAX_MSG_RATE_HZ));
 
        	_esc_status_pub.advertise();
+
+	// Initialize banned node ID list (temporary)
+	memset(banned_node_ids, 0, sizeof(banned_node_ids));
+	banned_node_ids[1]  = true;
+	banned_node_ids[10] = true;
+	PX4_INFO("HWESC banned node IDs: 1, 10");
 
 	return OK;
 }
@@ -156,6 +171,7 @@ UavcanHwescController::map_and_assign_all_once()
 	}
 
 	_can_control_ready = false;
+	_telem_ok = false;
 
 	// pre-mapping uses user configuration before get esc id responses
 	// how many escs are expected according to configuration and how many of them are can_throttle
@@ -178,20 +194,20 @@ UavcanHwescController::map_and_assign_all_once()
 	}
 
 	// call get esc id service
-	int res = get_esc_id_req();
-
-	// service call failed due to CAN driver issues
+	int res = get_esc_id_req(); // service call failed due to CAN driver issues
 	if (res < 0) {
 		if (res != -EAGAIN) {
-			error_handler(ESC_ERROR_GETESCID_FAIL, 0, res);
+			error_handler(HWESC_MAP_FAILED, 0, res);
 		}
-
 		return;
 	}
 
 	// service call ok, update last query time
-	// and notify mapping in progress
+	_last_esc_id_query = hrt_absolute_time();
+
+	// notify mapping in progress
 	_mapping_in_progress = true;
+
 	// deadline for all get esc id responses is 0.2 s from now.
 	_mapping_deadline_us = now + MAPPING_COLLECTION_WINDOW_US;
 }
@@ -217,6 +233,7 @@ UavcanHwescController::finalize_mapping_window()
 	_mapping_deadline_us = 0;
 
 	bool mapping_ok = true;
+	_telem_ok = true;
 
 	// check get esc id responses against flags frosm the pre-mapping
 	for (unsigned i = 0; i < MAX_ACTUATORS; ++i) {
@@ -225,6 +242,7 @@ UavcanHwescController::finalize_mapping_window()
 		// check for duplicate mappings
 		// this is a configuration error
 		if (esc.duplicate_mapping) {
+			_telem_ok = false;
 			mapping_ok = false;
 		}
 
@@ -233,12 +251,12 @@ UavcanHwescController::finalize_mapping_window()
 
 		// for can throttle escs -> drone should not arm if mapping not ok
 		if (esc.can_throttle && !responded) {
-			error_handler(ESC_ERROR_MISMATCHED_ESC_CONFIG, i, -1);
+			error_handler(HWESC_MISSING_ESC, i, -1);
 			mapping_ok = false;
 		}
 		// for non-can throttle escs -> warn only
 		else if (esc.is_expected && !responded) {
-			error_handler(ESC_WARN_MISSING_ESC, i, -1);
+			error_handler(HWESC_MISSING_ESC_WARN, i, -1);
 		}
 	}
 
@@ -289,19 +307,13 @@ UavcanHwescController::update_outputs(uint16_t outputs[MAX_ACTUATORS], unsigned 
 
 	// output either 4 or 8 channels depending on max configured.
 
-	// First determine how many channels are configured via UAVCAN_EC_FUNCx
-	uint8_t configured_count = 0;
-	for (int i = 0; i < MAX_ACTUATORS; i++) {
-		int32_t fn = 0;
-		if (param_get(_param_handles[i], &fn) == 0 && fn > 0) {
-			configured_count = i + 1;	// highest index seen + 1
-		}
-	}
-	if (configured_count == 0) {
+	// First fetch how many channels are configured via UAVCAN_EC_FUNCx
+
+	if (_uavcan_rotor_count == 0) {
 		return; // nothing configured, don't spam the bus
 	}
 
-	int required_len = (configured_count <= 4) ? 4 : 8;
+	int required_len = (_uavcan_rotor_count <= 4) ? 4 : 8;
 
 	if (required_len > MAX_ACTUATORS) {
 		required_len = MAX_ACTUATORS;
@@ -422,7 +434,7 @@ UavcanHwescController::periodic_update(const uavcan::TimerEvent &) {
 void
 UavcanHwescController::check_timeouts()
 {
-	const uint64_t now = hrt_absolute_time();
+	const hrt_abstime now = hrt_absolute_time();
 
 	// Rate limit the scan
 	if (_last_timeout_check != 0 && (now - _last_timeout_check) < CHECK_TIMEOUTS_MIN_US) {
@@ -464,6 +476,7 @@ UavcanHwescController::check_timeouts()
 			esc.active = false;
 			// Transition logging
 			PX4_WARN("ESC %d (node %u) inactive (MSG1 timeout)", i, esc.node_id);
+			error_handler(HWESC_MSG_TIMEOUT, i, -1);
 		}
 		} else {
 		if (!esc.active) {
@@ -477,30 +490,28 @@ UavcanHwescController::check_timeouts()
 }
 
 /**
- * Query all nodes for GetEscID
+ * Query all nodes for GetEscID as broadcast frame.
  *
- * Option	 	= 0x00	(data field to get ESC ID info)
- * Destination Node ID 	= 0x00 	(broadcast to all nodes)
+ * payload is 3 bytes long, but only first byte is used.
+ *
+ * payload[0]	 	= 0x00	(data field to get ESC ID info)
  *
  * @return OK on success, negative errno on failure
  */
 int
 UavcanHwescController::get_esc_id_req()
 {
-	// Rate limit the requests with _last_esc_id_query
 	if (hrt_elapsed_time(&_last_esc_id_query) < GET_ESCID_COOLDOWN_US) {
 		return -EAGAIN;
 	}
 
-	com::hobbywing::esc::GetEscID::Request req;
-	req.command = 0x00;
-	int res = _get_esc_id_client.call(0, req);
+	com::hobbywing::esc::GetEscID req{};
+	req.payload[0] = 0x00;
 
+	const int res = _pub_get_esc_id.broadcast(req);
 	if (res >= 0) {
-		// if call succeeded, also update last query time
 		_last_esc_id_query = hrt_absolute_time();
 	}
-
 	return res;
 }
 
@@ -512,31 +523,33 @@ UavcanHwescController::get_esc_id_req()
  *
 */
 void
-UavcanHwescController::get_esc_id_cb(const uavcan::ServiceCallResult<com::hobbywing::esc::GetEscID> &result) {
-    	if (!result.isSuccessful()) {
-		error_handler(ESC_ERROR_GETESCID_FAIL, 0, result.getError());
-		return;
-	}
-	// get node id and esc index from response.
+UavcanHwescController::get_esc_id_cb(const uavcan::ReceivedDataStructure<com::hobbywing::esc::GetEscID> &msg) {
+	// get node id and esc index from response. this is a received data structure with uint8_t payload[3] response
+	// first byte is node id, second byte is throttle channel. third byte is tail byte.
 
 	// received node id is checked if invalid.
-    	const uint8_t nid = result.getCallID().server_node_id.get();
+    	const uint8_t nid = msg.getSrcNodeID().get();
     	if (nid == 0 || nid >= 0x7E) return; 	// TODO: Replace with a function that checks for valid node IDs and handle errors
 
-	if (is_banned_node(nid)) {
-		PX4_WARN("Ignoring banned ESC node ID %u", nid);
-		return;
-	}
-
 	// received throttle channel is checked if invalid, then esc index is retrieved.
-    	const uint8_t idx = throttle_ch2esc_index(result.getResponse().throttle_channel);
+
+    	const uint8_t idx = throttle_ch2esc_index(msg.payload[1]);
     	if (idx == kInvalidIdx) {
-		error_handler(ESC_ERROR_INVALID_THROTTLE_CH, nid, -1);
+		error_handler(HWESC_INVALID_INDEX, nid, -1);
         	// PX4_WARN("GetEscID bad channel from node %u", nid);
 		return;
     	}
 
     	ESCStatus &esc = _esc_data[idx];
+
+	// Duplicate Mappings - TYPE 0: banned node ids
+	// Banned node ids are some specific IDs that are reserved for other nodes.
+	if (is_banned_node(nid)) {
+		// For this case we also set duplicate mapping.
+		esc.duplicate_mapping = true;
+		error_handler(HWESC_INVALID_ADDR, nid, -1);
+		return;
+	}
 
 	// Duplicate mappings - TYPE I: two escs claiming the same esc index.
 	// To check for duplicate mappings, check if the esc index already has a node id assigned
@@ -544,7 +557,7 @@ UavcanHwescController::get_esc_id_cb(const uavcan::ServiceCallResult<com::hobbyw
 	if (esc.node_id != kInvalidNID && esc.node_id != nid) {
 		if (!esc.duplicate_mapping) {
 			esc.duplicate_mapping = true;
-			error_handler(ESC_ERROR_DUPLICATE_MAPPING, idx, -1);
+			error_handler(HWESC_DUPLICATE_INDEX, idx, -1);
 		}
 		return;
 	}
@@ -552,7 +565,7 @@ UavcanHwescController::get_esc_id_cb(const uavcan::ServiceCallResult<com::hobbyw
 	if (has_duplicate_node_id(nid, idx)) {
 		if (!esc.duplicate_mapping) {
 			esc.duplicate_mapping = true;
-			error_handler(ESC_ERROR_DUPLICATE_MAPPING, idx, -1);
+			error_handler(HWESC_DUPLICATE_ADDR, idx, -1);
 		}
 		return;
 	}
@@ -596,11 +609,17 @@ UavcanHwescController::status_msg1_sub_cb(const uavcan::ReceivedDataStructure<co
 		// During mapping, ignore status messages
 		return;
 	}
+	// If node id is banned, ignore message and log error
+	int nid = msg.getSrcNodeID().get();
+	if (is_banned_node(nid)) {
+		error_handler(HWESC_INVALID_ADDR, nid, -1);
+		return;
+	}
 	// Find esc index from node id
-	const uint8_t idx = fetch_node_esc_index(msg.getSrcNodeID().get());
-	// Not found, might be a new esc, return invalid index and request reinit.
+	const uint8_t idx = fetch_node_esc_index(nid);
+	// Not found, might be a new esc, function returns invalid index and driver requests reinit.
 	if (idx == kInvalidIdx) {
-		error_handler(ESC_ERROR_INVALID_INDEX, msg.getSrcNodeID().get(), -1);
+		error_handler(HWESC_UNDISC_ADDR, nid, -1);
 		return;
 	}
 
@@ -630,11 +649,14 @@ UavcanHwescController::status_msg2_sub_cb(const uavcan::ReceivedDataStructure<co
 		// During mapping, ignore status messages
 		return;
 	}
-	const uint8_t idx = fetch_node_esc_index(msg.getSrcNodeID().get());
-	if (idx == kInvalidIdx) return;
-	auto &esc = _esc_data[idx];
+	int nid = msg.getSrcNodeID().get();		// get node id
+	if (is_banned_node(nid)) return;		// banned node id
+	const uint8_t idx = fetch_node_esc_index(nid);	// fetch esc index from node id
+	if (idx == kInvalidIdx) return;			// index not found
 
-	esc.voltage_mv       = msg.voltage;
+	auto &esc = _esc_data[idx];			// proceed with parsing the message
+
+	esc.voltage_mv       = msg.input_voltage;
 	esc.current_ma       = msg.current;
 	esc.temperature_deg  = msg.temperature;
 
@@ -696,55 +718,41 @@ UavcanHwescController::status_msg2_sub_cb(const uavcan::ReceivedDataStructure<co
  * uint8 FAILURE_OVER_ESC_TEMPERATURE = 9	# (1 << 9)
  * uint8 ESC_FAILURE_COUNT = 10 		# Counter - keep it as last element!
  */
-uint16_t statusflags_to_failures(uint16_t status_flags) {
-    uint16_t failures = 0;
-    uint8_t count = 0;
-	// TODO: implement the function as described above
+static inline uint16_t
+statusflags_to_failures(uint16_t s)
+{
+// Maps Hobbywing 16-bit status to PX4 esc_report_s failures (bits 0..9).
+// Bits 10..15 carry the count of set failure bits (0..63).
+	uint16_t f = 0;
 
-	// Check following bits (with corresponding counterparts on the other side)
-	// of HWESC status flags and set corresponding bits in failures
-	// Bit 0: Over Voltage -> FAILURE_OVER_VOLTAGE
-	if (status_flags & (1 << 0)) {
-		failures |= (1 << 1);
-		count++;
+	// direct mappings
+	if (s & (1u << 0))  f |= (1u << 1);  // Over Voltage -> OVER_VOLTAGE
+	if (s & (1u << 2))  f |= (1u << 0);  // Over Current -> OVER_CURRENT
+	if (s & (1u << 4))  f |= (1u << 4);  // Throttle Lost -> INCONSISTENT_CMD
+	if (s & (1u << 5))  f |= (1u << 4);  // Throttle Not Zero -> INCONSISTENT_CMD
+	if (s & (1u << 6))  f |= (1u << 9);  // MOS Overheat -> ESC_OVER_TEMP (critical)
+	if (s & (1u << 7))  f |= (1u << 8);  // Capacitor Overheat -> ESC_WARN_TEMP (warn)
+	if (s & (1u << 8))  f |= (1u << 5);  // Motor Stalled -> MOTOR_STUCK
+
+	// group to GENERIC: undervolt, MOS open/short, motor disconnect, opamp fail, comm abnormal
+	if (s & ((1u << 1) | (1u << 9) | (1u << 10) | (1u << 11) | (1u << 12) | (1u << 13))) {
+		f |= (1u << 6);                  // GENERIC
 	}
-	// Skip Bit 1: Under Voltage (no counterpart)
-	// Bit 2: Over Current -> FAILURE_OVER_CURRENT
-	if (status_flags & (1 << 2)) {
-		failures |= (1 << 0);
-		count++;
-	}
-	// Skip Bit 3: Positioning for now FAILURE_GENERIC maybe later
-	// Ship Bit 4: Throttle Lost for now, FAILURE_GENERIC maybe later
-	// Skip Bit 5: Throttle Not Reset to Zero for now, INCONSISTENT_CMD maybe later
-	// Bit 6: MOS Overheating -> FAILURE_OVER_ESC_TEMPERATURE
-	if (status_flags & (1 << 6)) {
-		failures |= (1 << 9);
-		count++;
-	}
-	// Bit 7: Capacitor Overheating -> FAILURE_OVER_ESC_TEMPERATURE
-	if (status_flags & (1 << 7)) {
-		failures |= (1 << 9);
-		count++;
-	}
-	// Skip Bit 8: Motor Stalled for now, FAILURE_MOTOR_STUCK maybe later
-	// Skip Bit 9: MOS Open (no counterpart)
-	// Skip Bit 10: MOS Short (no counterpart)
-	// Skip Bit 11: Motor Disconnection (no counterpart)
-	// Skip Bit 12: Opamp Failure (no counterpart)
-	// Bit 13: Communication Status (if bit is set abnormal) -> FAILURE_GENERIC
-	if (status_flags & (1 << 13)) {
-		failures |= (1 << 6);
-		count++;
-	}
-	// Skip Bit 14: Rotation Direction 0:CW 1:CCW (Irrelevant for us)
-	// Skip Bit 15: Throttle Source 0:CAN 1:Analog (Irrelevant for us)
-	// Set failure count
-	if (count > 0) {
-		if (count > 0x3F) count = 0x3F; // limit to 6 bits
-		failures |= (count << 10);
-	}
-    return failures;
+
+	// pack count of failure bits 0..9 into 10..15
+	#if defined(__GNUC__) || defined(__clang__)
+	uint16_t cnt = __builtin_popcount(f & 0x03FFu);
+	#else
+	// portable popcount for 10 bits
+	uint16_t x = (f & 0x03FFu);
+	x = (x & 0x5555u) + ((x >> 1) & 0x5555u);
+	x = (x & 0x3333u) + ((x >> 2) & 0x3333u);
+	x = (x + (x >> 4)) & 0x0F0Fu;
+	x = (x + (x >> 8)) & 0x001Fu;
+	uint16_t cnt = x;
+	#endif
+	if (cnt > 63) cnt = 63;
+	return f | (cnt << 10);
 }
 
 /**
@@ -836,10 +844,8 @@ UavcanHwescController::maybe_publish_esc_status()
 		status.esc_online_flags |= (1u << i);
 		status.esc_armed_flags  |= (1u << i);	// TODO: decide how to manage armed flags for can escs apart from online only
 		} else {
-
-
+			// Not online.
 		}
-
 		// Clear edge flags for next cycle after publishing so don't report same data again.
 		_esc_data[i].msg1_received = false;
 		_esc_data[i].msg2_received = false;
@@ -867,100 +873,69 @@ UavcanHwescController::fetch_node_esc_index(uint8_t node_id) const
 bool
 UavcanHwescController::is_banned_node(uint8_t node_id) const
 {
-	(void)node_id;
-	// TODO: introduce parameter-set list of banned node IDs when required by fleet policy
-	return false;
+    if (node_id < sizeof(banned_node_ids)) {
+        return banned_node_ids[node_id];
+    }
+    return false;
 }
 
 int
 UavcanHwescController::error_handler(uint8_t error_type, uint8_t val, int res)
 {
+	static uint8_t prev_error_type = HWESC_OK;
 	static int error_count = 0;
 	static hrt_abstime last_error_time = 0;
 
-	if (res >= 0) {
-		return OK; // no error to handle
-	}
+	const hrt_abstime now = hrt_absolute_time();   // <-- move to top
 
-	int ret = res;
+	// if res >= 0 it's informational; don't early-return OK because callers
+	// may rely on side effects (like setting _reinit_requested)
+	// We'll still proceed with switching on error_type.
+
+	// simple 1 Hz rate limit for errors.
+	if ((now - last_error_time) < 1'000'000 && error_type == prev_error_type) {
+		return error_type;
+	}
+	last_error_time = now;
+
+	prev_error_type = error_type;
+	error_count++;
 
 	bool try_reinit = false;
 
-	error_count++;
-
-	// TODO: implement error counter to avoid spamming the logs + stop trying to reinit if too many errors
-	// reset counter if no errors for a while
-
-	const hrt_abstime now = hrt_absolute_time();
-
 	switch (error_type) {
-	case ESC_ERROR_INVALID_INDEX:
-		// Rate limit the warnings
-		// Because this error might be called multiple times for the same unknown node id
-		if (hrt_elapsed_time(&_last_invalid_index_warn) > WARN_THROTTLE_INTERVAL_US) {
-			_last_invalid_index_warn = hrt_absolute_time();
-			PX4_WARN("Unknown ESC node ID %u, requesting remap", val);
-		}
+	case HWESC_MAP_FAILED:
+	case HWESC_INVALID_INDEX:
+	case HWESC_UNEXPECTED_INDEX:
+	case HWESC_MISSING_ESC:
+		PX4_ERR("MISSING ESC! DON'T ARM");
+		try_reinit = true;
+		break;
+	case HWESC_DUPLICATE_INDEX:
+	case HWESC_DUPLICATE_ADDR:
+	case HWESC_MSG_TIMEOUT:
+	case HWESC_INVALID_ADDR:
+	case HWESC_MAP_TIMEOUT:
 		try_reinit = true;
 		break;
 
-	case ESC_ERROR_INVALID_THROTTLE_CH:
-		PX4_WARN("GetEscID invalid throttle channel from node %u", val);
-		try_reinit = true;
-		break;
-
-	case ESC_ERROR_DUPLICATE_MAPPING:
-		PX4_WARN("Duplicate GetEscID mapping on ESC index %u", val);
-		try_reinit = true;
-		break;
-
-	case ESC_ERROR_MISMATCHED_ESC_CONFIG:
-		PX4_WARN("ESC index %u configured for CAN but no node mapped", val);
-		try_reinit = true;
-		break;
-
-	case ESC_WARN_MISSING_ESC:
-		PX4_INFO("ESC index %u expected but no mapping received", val);
-		break;
-
-	case ESC_ERROR_GETESCID_FAIL:
-		PX4_ERR("GetEscID request failed (%d)", res);
-		try_reinit = true;
-		break;
-
-	case ESC_ERROR_GETESCID_TIMEOUT:
-		PX4_WARN("GetEscID request timed out");
-		try_reinit = true;
-		break;
-
-	case ESC_ERROR_UNEXPECTED_NODEID:
-		PX4_WARN("Unexpected node id %u in GetEscID response", val);
-		try_reinit = true;
-		break;
-
-	case ESC_ERROR_UNEXPECTED_ESC_COUNT:
-		PX4_WARN("Unexpected ESC count during mapping");
-		try_reinit = true;
-		break;
-
+	case HWESC_MISSING_ESC_WARN:
+	case HWESC_UNDISC_ADDR:
+	case HWESC_OK:
 	default:
+		PX4_ERR("HWESC error: %u (val=%u, res=%d)", error_type, val, res); // log all errors.
 		break;
 	}
 
 	if (try_reinit) {
-		// check if armed first before requesting reinit
-		// if armed, don't request reinit, just return error
 		if (_armed) {
 			PX4_WARN("Cannot reinitialize Hobbywing ESCs while armed");
 		} else {
 			_reinit_requested = true;
-			ret = _reinit_requested; // indicate to caller that reinit is requested
 		}
 	}
 
-	// TODO: standardize error handling return values for the module
-	// for now, return OK
-	return OK;
+	return OK; // TODO: improve as a stateful handler: Return OK when you handled it , and a negative errno only if you couldn’t.
 }
 
 // later on add logic for maintenance info. void esc_maintenance_res_cb(const uavcan::ServiceCallResult<com::hobbywing::esc::GetMaintenanceInformation> &msg) { }
