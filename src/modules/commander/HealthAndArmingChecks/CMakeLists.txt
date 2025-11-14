@@ -38,6 +38,7 @@ px4_add_library(health_and_arming_checks
 	checks/accelerometerCheck.cpp
 	checks/airspeedCheck.cpp
 	checks/armPermissionCheck.cpp
+	checks/authenticationCheck.cpp
 	checks/baroCheck.cpp
 	checks/batteryCheck.cpp
 	checks/cpuResourceCheck.cpp

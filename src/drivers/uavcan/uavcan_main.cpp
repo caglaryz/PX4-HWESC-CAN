@@ -40,6 +40,9 @@
  * @author David Sidrane <david_s5@nscdg.com>
  * @author Andreas Jochum <Andreas@NicaDrone.com>
  *
+ * Added SHA1 Key based Node Authentication, 2025
+ * @author Caglar Yilmaz <yilmaz.caglar@tubitak.gov.tr>
+ *
  */
 
 #include <px4_platform_common/px4_config.h>
@@ -107,6 +110,7 @@ UavcanNode::UavcanNode(uavcan::ICanDriver &can_driver, uavcan::ISystemClock &sys
 	_time_sync_slave(_node),
 	_node_status_monitor(_node),
 	_node_info_retriever(_node),
+	_authenticator(_node),			// added for authenticator
 	_master_timer(_node),
 	_param_getset_client(_node),
 	_param_opcode_client(_node),
@@ -152,6 +156,7 @@ UavcanNode::~UavcanNode()
 
 	// Removing the sensor bridges
 	_sensor_bridges.clear();
+	_authenticator.clear();
 
 	pthread_mutex_destroy(&_node_mutex);
 
@@ -588,6 +593,13 @@ UavcanNode::init(uavcan::NodeID node_id, UAVCAN_DRIVER::BusEvent &bus_events)
 		return ret;
 	}
 
+	ret = _authenticator.init();
+
+	if (ret < 0) {
+		PX4_ERR("Authenticator init: %d", ret);
+		return ret;
+	}
+
 	// Sensor bridges
 	IUavcanSensorBridge::make_all(_node, _sensor_bridges);
 
@@ -747,9 +759,44 @@ UavcanNode::Run()
 	perf_begin(_cycle_perf);
 	perf_count(_interval_perf);
 
+	_authenticator.set_armed();
+
 	for (auto &br : _sensor_bridges) {
 		br->update();
+
+		if (_authenticator.auth_system_ok() && _authenticator.is_auth_required(br->get_name())) {
+
+			// Use a small fixed stack buffer.
+			constexpr unsigned kMax = 4; // TEMP: choose conservatively, equals to UavcanSensorBridgeBase::DEFAULT_MAX_CHANNELS but we can't access that here.
+			UavcanSensorBridgeBase::BridgeChannelEntry entries[kMax]{};
+
+			/* Here, each entry consists of the node ID, instance ID, and channel ID.*/
+
+			const unsigned cnt = br->collect_active_channels(entries, kMax);
+
+			/* Application stops refreshing last_seen and also bail out early in update() while armed.
+			 * On disarm, Run() refreshes last_seen via collect_active_channels() before update() runs,
+			 * so the app won’t accidentally delete live nodes on the first post-disarm cycle. */
+
+			for (unsigned i = 0; i < cnt; i++) {
+				const auto &e = entries[i];
+
+				if (_authenticator.is_node_authed(e.node_id)) {
+					// already authenticated, just refresh last seen
+					_authenticator.refresh_node(e.node_id);
+				} else if (_authenticator.is_node_registered(e.node_id)) {
+					// already registered, just update last seen
+					_authenticator.refresh_node(e.node_id);
+				} else {
+					_authenticator.register_discovered(e.node_id, br->get_name(), e.instance);
+				}
+			}
+		}
 	}
+
+	/* Don't use _node_status_monitor.forEachNode anymore. Switched to update last seen instead. */
+
+	_authenticator.update();
 
 	if (_check_fw) {
 		_check_fw = false;

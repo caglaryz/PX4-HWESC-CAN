@@ -81,6 +81,7 @@
 #endif
 
 #include "sensors/sensor_bridge.hpp"
+#include "authenticator.hpp"		// added for authenticator
 #include "uavcan_driver.hpp"
 #include "uavcan_servers.hpp"
 
@@ -287,6 +288,7 @@ private:
 	uavcan::NodeStatusMonitor	_node_status_monitor;
 
 	uavcan::NodeInfoRetriever   _node_info_retriever;
+	UavcanAuthenticator          _authenticator;
 
 	List<IUavcanSensorBridge *>	_sensor_bridges;		///< List of active sensor bridges
 

@@ -81,6 +81,13 @@ public:
 	 * Creates all known sensor bridges and puts them in the linked list.
 	 */
 	static void make_all(uavcan::INode &node, List<IUavcanSensorBridge *> &list);
+
+	struct BridgeChannelEntry {
+		uint8_t     instance; // 0-based
+		uint8_t     node_id;  // 0..127
+	};
+
+	virtual unsigned collect_active_channels(BridgeChannelEntry* /*out*/, unsigned /*max*/) const { return 0; }
 };
 
 namespace uavcan_bridge
@@ -143,4 +150,7 @@ public:
 	int8_t get_channel_index_for_node(int node_id);
 
 	void print_status() const override;
+
+	using BridgeChannelEntry = IUavcanSensorBridge::BridgeChannelEntry;
+	unsigned collect_active_channels(BridgeChannelEntry* out, unsigned max) const override;
 };

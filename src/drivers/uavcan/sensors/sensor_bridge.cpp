@@ -409,3 +409,17 @@ void UavcanSensorBridgeBase::print_status() const
 		}
 	}
 }
+
+unsigned
+UavcanSensorBridgeBase::collect_active_channels(BridgeChannelEntry* out, unsigned max) const
+{
+	unsigned n = 0;
+	for (unsigned i = 0; i < _max_channels && n < max; i++) {
+		if (_channels[i].node_id >= 0) {
+			out[n].instance = static_cast<uint8_t>(i);
+			out[n].node_id  = static_cast<uint8_t>(_channels[i].node_id);
+			n++;
+		}
+	}
+	return n;
+}

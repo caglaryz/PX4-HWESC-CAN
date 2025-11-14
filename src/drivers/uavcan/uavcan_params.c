@@ -435,3 +435,50 @@ PARAM_DEFINE_INT32(UAVCAN_SUB_RNG, 0);
  * @group UAVCAN
  */
 PARAM_DEFINE_INT32(UAVCAN_SUB_BTN, 0);
+
+/**
+ * SHA1 Authentication
+ *
+ * Enable UAVCAN Node Authentication.
+ *  com::auth::GetSHA1Key
+ *
+ * Only use with nodes supporting this.
+ * Other nodes will not be affected.
+ *
+ * @min 0
+ * @max 3
+ * @value 0 Disabled (Can't use SHA1 nodes)
+ * @value 1 Only Request and Store SHA1 Key
+ * @value 2 Request and Verify Key
+ * @reboot_required true
+ * @group UAVCAN
+ */
+PARAM_DEFINE_INT32(UAVCAN_AUTH_MODE, 0);
+
+/**
+ * Authenticated device types bitmask
+ *
+ * Select which UAVCAN sensor classes must respond to the
+ * com.auth.GetSHA1Key service before being considered valid
+ * when UAVCAN_AUTH_MODE > 0.
+ *
+ * Bit 0 - accelerometer
+ * Bit 1 - airspeed sensor
+ * Bit 2 - barometer
+ * Bit 3 - battery monitor
+ * Bit 4 - differential pressure sensor
+ * Bit 5 - optical flow sensor
+ * Bit 6 - fuel tank sensor
+ * Bit 7 - GNSS receiver
+ * Bit 8 - GNSS relative
+ * Bit 9 - gyroscope
+ * Bit 10 - hygrometer
+ * Bit 11 - ICE status
+ * Bit 12 - magnetometer
+ * Bit 13 - rangefinder
+ * Bit 14 - safety button
+ * @min 0
+ * @reboot_required true
+ * @group UAVCAN
+ */
+PARAM_DEFINE_INT32(UAVCAN_AUTH_MASK, 0);
