@@ -40,6 +40,9 @@
  * @author David Sidrane <david_s5@nscdg.com>
  * @author Andreas Jochum <Andreas@NicaDrone.com>
  *
+ * Added Hobbywing ESC Control and Telemetry, 2025
+ * @author Caglar Yilmaz <yilmaz.caglar@tubitak.gov.tr>
+ *
  */
 
 #include <px4_platform_common/px4_config.h>
@@ -87,6 +90,7 @@ UavcanNode::UavcanNode(uavcan::ICanDriver &can_driver, uavcan::ISystemClock &sys
 	_beep_controller(_node),
 #endif
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
+	_hwesc_controller(_node),
 	_esc_controller(_node),
 	_servo_controller(_node),
 #endif
@@ -529,7 +533,15 @@ UavcanNode::init(uavcan::NodeID node_id, UAVCAN_DRIVER::BusEvent &bus_events)
 
 	// Actuators
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
-	ret = _esc_controller.init();
+	/* Init Hobbywing ESC Control if UAVCAN_ESC_PROTO is non-zero */
+	int32_t uavcan_esc_protocol = 0;
+	param_get(param_find("UAVCAN_ESC_PROTO"), &uavcan_esc_protocol);
+
+	if(uavcan_esc_protocol != 0) {
+		ret = _hwesc_controller.init();
+	} else {
+		ret = _esc_controller.init();
+	}
 
 	if (ret < 0) {
 		return ret;
@@ -1024,6 +1036,42 @@ UavcanNode::Run()
 }
 
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
+bool UavcanMixingInterfaceHWESC::updateOutputs(uint16_t outputs[MAX_ACTUATORS], unsigned num_outputs,
+		unsigned num_control_groups_updated)
+{
+	_hwesc_controller.update_outputs(outputs, num_outputs);
+	return true;
+}
+
+void UavcanMixingInterfaceHWESC::Run()
+{
+	pthread_mutex_lock(&_node_mutex);
+	_mixing_output.update();
+	_mixing_output.updateSubscriptions(false);
+	pthread_mutex_unlock(&_node_mutex);
+}
+
+// Even if PWM or CAN regardless, rotor count is based on mixer functions and can be used in
+void UavcanMixingInterfaceHWESC::mixerChanged()
+{
+	int rotor_count = 0;
+
+	for (unsigned i = 0; i < MAX_ACTUATORS; ++i) {
+		rotor_count += _mixing_output.isFunctionSet(i);
+
+		if (i < esc_status_s::CONNECTED_ESC_MAX) {
+			_hwesc_controller.esc_status().esc[i].actuator_function = (uint8_t)_mixing_output.outputFunction(i);
+		}
+	}
+	_hwesc_controller.set_rotor_count(rotor_count);
+}
+
+bool UavcanMixingInterfaceESC::updateOutputs(uint16_t outputs[MAX_ACTUATORS], unsigned num_outputs,
+		unsigned num_control_groups_updated)
+{
+	_esc_controller.update_outputs(outputs, num_outputs);
+	return true;
+}
 bool UavcanMixingInterfaceESC::updateOutputs(bool stop_motors, uint16_t outputs[MAX_ACTUATORS], unsigned num_outputs,
 		unsigned num_control_groups_updated)
 {

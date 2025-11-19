@@ -38,6 +38,10 @@
  *
  * @author Pavel Kirienko <pavel.kirienko@gmail.com>
  *		 Andreas Jochum <Andreas@NicaDrone.com>
+ *
+ * Added Hobbywing ESC Control and Telemetry, 2025
+ * @author Caglar Yilmaz <yilmaz.caglar@tubitak.gov.tr>
+ *
  */
 
 #pragma once
@@ -47,6 +51,7 @@
 #include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
 
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
+#include "actuators/hwesc.hpp"	// for hobbywing ESC Control and Telemetry
 #include "actuators/esc.hpp"
 #include "actuators/servo.hpp"
 #endif
@@ -119,6 +124,30 @@ class UavcanNode;
  */
 
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
+class UavcanMixingInterfaceHWESC : public OutputModuleInterface
+{
+public:
+	UavcanMixingInterfaceHWESC(pthread_mutex_t &node_mutex,
+		UavcanHwescController &hwesc_controller)
+		: OutputModuleInterface(MODULE_NAME "-actuators-hwesc", px4::wq_configurations::uavcan),
+		  _node_mutex(node_mutex),
+		  _hwesc_controller(hwesc_controller) {}
+
+	bool updateOutputs(uint16_t outputs[MAX_ACTUATORS],
+			   unsigned num_outputs, unsigned num_control_groups_updated) override;
+
+	void mixerChanged() override;
+
+	MixingOutput &mixingOutput() { return _mixing_output; }
+
+protected:
+	void Run() override;
+private:
+	friend class UavcanNode;
+	pthread_mutex_t &_node_mutex;
+	UavcanHwescController &_hwesc_controller;
+	MixingOutput _mixing_output{"UAVCAN_EC", UavcanHwescController::MAX_ACTUATORS, *this, MixingOutput::SchedulingPolicy::Auto, false, false};
+};
 class UavcanMixingInterfaceESC : public OutputModuleInterface
 {
 public:
@@ -261,6 +290,10 @@ private:
 	UavcanBeepController		_beep_controller;
 #endif
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
+	// Added Hobbywing ESC Control
+	UavcanHwescController		_hwesc_controller;
+	UavcanMixingInterfaceHWESC 	_mixing_interface_hwesc{_node_mutex, _hwesc_controller};
+
 	UavcanEscController		_esc_controller;
 	UavcanMixingInterfaceESC 	_mixing_interface_esc{_node_mutex, _esc_controller};
 
