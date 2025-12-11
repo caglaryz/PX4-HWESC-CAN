@@ -102,6 +102,9 @@ UavcanNode::UavcanNode(uavcan::ICanDriver &can_driver, uavcan::ISystemClock &sys
 #if defined(CONFIG_UAVCAN_RGB_CONTROLLER)
 	_rgbled_controller(_node),
 #endif
+#if defined(CONFIG_UAVCAN_HWESC)
+	_hwesc_driver(_node),
+#endif
 	_log_message_controller(_node),
 	_time_sync_master(_node),
 	_time_sync_slave(_node),
@@ -576,6 +579,21 @@ UavcanNode::init(uavcan::NodeID node_id, UAVCAN_DRIVER::BusEvent &bus_events)
 
 	if (ret < 0) {
 		return ret;
+	}
+
+#endif
+
+	// Hobbywing CAN ESC
+#if defined(CONFIG_UAVCAN_HWESC)
+	int32_t uavcan_sub_hwesc = 0;
+	param_get(param_find("UAVCAN_SUB_HWESC"), &uavcan_sub_hwesc);
+
+	if (uavcan_sub_hwesc == 1) {
+		ret = _hwesc_driver.init();
+
+		if (ret < 0) {
+			return ret;
+		}
 	}
 
 #endif

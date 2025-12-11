@@ -435,3 +435,17 @@ PARAM_DEFINE_INT32(UAVCAN_SUB_RNG, 0);
  * @group UAVCAN
  */
 PARAM_DEFINE_INT32(UAVCAN_SUB_BTN, 0);
+/**
+ * subscription HobbywingESC
+ *
+ * Enable UAVCAN Hobbywing ESC MSG1,2,3 subscriptions.
+ * com::hobbywing::esc::GetEscID
+ * com::hobbywing::esc::StatusMsg1
+ * com::hobbywing::esc::StatusMsg2
+ * com::hobbywing::esc::StatusMsg3
+ *
+ * @boolean
+ * @reboot_required true
+ * @group UAVCAN
+ */
+PARAM_DEFINE_INT32(UAVCAN_SUB_HWESC, 0);

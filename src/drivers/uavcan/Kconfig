@@ -90,6 +90,10 @@ if DRIVERS_UAVCAN
         bool "Subscribe to Safety Button:               ardupilot::indication::Button"
         default y
 
+    config UAVCAN_HWESC
+	bool "Subscribe to Hobbywing ESC MSG1,2,3:	com::hobbywing::esc::GetEscID | com::hobbywing::esc::StatusMsg1 | com::hobbywing::esc::StatusMsg2 | com::hobbywing::esc::StatusMsg3"
+	default y
+
 endif #DRIVERS_UAVCAN
 
 

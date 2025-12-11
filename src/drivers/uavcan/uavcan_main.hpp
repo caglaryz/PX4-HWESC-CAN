@@ -76,6 +76,10 @@
 #include "rgbled.hpp"
 #endif
 
+#if defined(CONFIG_UAVCAN_HWESC)
+#include "hwesc.hpp"
+#endif
+
 #if defined(CONFIG_UAVCAN_SAFETY_STATE_CONTROLLER)
 #include "safety_state.hpp"
 #endif
@@ -278,6 +282,9 @@ private:
 #endif
 #if defined(CONFIG_UAVCAN_RGB_CONTROLLER)
 	UavcanRGBController             _rgbled_controller;
+#endif
+#if defined(CONFIG_UAVCAN_HWESC)
+	UavcanHWingEscDriver            _hwesc_driver;
 #endif
 
 	UavcanLogMessage                _log_message_controller;
