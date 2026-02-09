@@ -120,8 +120,8 @@ void UavcanHWingEscDriver::hwesc_statusmsg2_sub_cb(const uavcan::ReceivedDataStr
 	auto &esc = _esc_data[idx];
 
 	// Raw values need to be divided by 10 when publishing
-	esc.voltage_mv = msg.input_voltage;  // in deciVolts (V * 10)
-	esc.current_ma = msg.current;  // in deciAmps (A * 10)
+	esc.voltage_dv = msg.input_voltage;  	// in deciVolts (V * 10)
+	esc.current_da = msg.current;  		// in deciAmps (A * 10)
 	esc.temperature_deg = msg.temperature;
 
 	esc.msg2_received = true;
@@ -149,7 +149,7 @@ bool UavcanHWingEscDriver::check_online(int idx, uint64_t now)
 	ESCStatus &esc = _esc_data[idx];
 
 	if (esc.online && (hrt_elapsed_time(&esc.timestamp_id) > hwesc::STATUS_TIMEOUT)) {
-		// Get ESC ID Timeout!
+		// Status Message Timeout!
 		esc.online = false;
 		// Transition logging
 		PX4_WARN("ESC %d (node %d) heartbeat timed out", esc.throttle_id, esc.node_id);
@@ -286,15 +286,15 @@ void UavcanHWingEscDriver::maybe_publish_status(uint64_t now)
 		if (esc_online) {
 			++online_count;
 
-			status.esc[i].timestamp       = status.timestamp;
-			status.esc[i].esc_address     = e.node_id;
-			status.esc[i].esc_voltage     = e.voltage_mv * 0.1f;
-			status.esc[i].esc_current     = e.current_ma * 0.1f;
-			status.esc[i].esc_temperature = e.temperature_deg;
-			status.esc[i].esc_rpm         = e.rpm;
-			status.esc[i].esc_power       = e.pwm/8191.0f;	// TODO: 0-8191 maps to 0-100% power - variable type mismatch, fix uint16_t to int8_t in uORB side.
-			status.esc[i].failures	    = statusflags_to_failures(e.status_flags);
-			status.esc[i].esc_errorcount  = 0;		// TODO: add error count if available
+			status.esc[i].timestamp       	= status.timestamp;
+			status.esc[i].esc_address     	= e.node_id;
+			status.esc[i].esc_voltage     	= e.voltage_dv * 0.1f;
+			status.esc[i].esc_current     	= e.current_da * 0.1f;
+			status.esc[i].esc_temperature 	= e.temperature_deg;
+			status.esc[i].esc_rpm         	= e.rpm;
+			status.esc[i].esc_power 	= static_cast<int8_t>((e.pwm / 8191.0f) * 100.0f);
+			status.esc[i].failures	    	= statusflags_to_failures(e.status_flags);
+			status.esc[i].esc_errorcount  	= 0;		// TODO: add error count if available
 
 			status.esc_online_flags |= (1u << i);
 

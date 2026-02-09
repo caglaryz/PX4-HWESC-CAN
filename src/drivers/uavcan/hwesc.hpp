@@ -48,8 +48,8 @@ struct ESCStatus {
 	uint16_t rpm{0};
 	uint16_t pwm{0};
 	uint16_t status_flags;
-	uint16_t voltage_mv{0};
-	uint16_t current_ma{0};
+	uint16_t voltage_dv{0};  // decivolts (V * 10)
+	uint16_t current_da{0};  // deciamps (A * 10)
 	uint8_t temperature_deg{0};
 	// uint8_t mos_temp_deg{0};
 	// uint8_t cap_temp_deg{0};
