@@ -1,0 +1,73 @@
+#!/bin/sh
+#
+# @name Gazebo x500_custom
+#
+# @type Quadrotor
+#
+
+. ${R}etc/init.d/rc.mc_defaults
+
+set PX4_SIMULATOR gz
+set PX4_GZ_WORLD default
+set PX4_SIM_MODEL x500_custom
+
+param set-default SIM_GZ_EN 1
+
+param set-default CA_AIRFRAME 0
+param set-default CA_ROTOR_COUNT 4
+
+param set-default CA_ROTOR0_PX 0.64
+param set-default CA_ROTOR0_PY 0.75
+param set-default CA_ROTOR0_KM  0.05
+
+param set-default CA_ROTOR1_PX -0.684
+param set-default CA_ROTOR1_PY -0.75
+param set-default CA_ROTOR1_KM  0.05
+
+param set-default CA_ROTOR2_PX 0.74
+param set-default CA_ROTOR2_PY -0.75
+param set-default CA_ROTOR2_KM -0.05
+
+param set-default CA_ROTOR3_PX -0.64
+param set-default CA_ROTOR3_PY 0.75
+param set-default CA_ROTOR3_KM -0.05
+
+param set-default SIM_GZ_EC_FUNC1 104
+param set-default SIM_GZ_EC_FUNC2 103
+param set-default SIM_GZ_EC_FUNC3 101
+param set-default SIM_GZ_EC_FUNC4 102
+
+param set-default SIM_GZ_EC_MIN1 50  #Fırlama olayı bu 4 parametre yüzünden sim kaynaklı bir problem
+param set-default SIM_GZ_EC_MIN2 50
+param set-default SIM_GZ_EC_MIN3 50
+param set-default SIM_GZ_EC_MIN4 50
+
+param set-default SIM_GZ_EC_MAX1 1000
+param set-default SIM_GZ_EC_MAX2 1000
+param set-default SIM_GZ_EC_MAX3 1000
+param set-default SIM_GZ_EC_MAX4 1000
+
+# 1) Hover/Min/Max thrust (20 kg için)
+param set-default MPC_THR_HOVER 0.36
+param set-default MPC_THR_MIN   0.05
+param set-default MPC_THR_MAX   0.75   # (geçici tavan; gerekirse 0.65–0.8 aralığında deneriz)
+
+# 2) Dikey HIZ limitleri (gerçek sınır!)
+# param set-default MPC_Z_VEL_ALL     0.8   # m/s genel limit (senin ekranda vardı)
+# param set-default MPC_Z_VEL_MAX_UP  1.2   # m/s tırmanma limiti
+# param set-default MPC_Z_VEL_MAX_DN  0.8   # m/s alçalma limiti
+# param set-default MPC_Z_V_AUTO_UP   1.0   # m/s otonom mod tırmanma
+# param set-default MPC_Z_V_AUTO_DN   0.8   # m/s otonom mod alçalma
+
+# # 3) Takeoff (kalkış) hedefi
+# param set-default MPC_TKO_SPEED 0.6       # m/s (takeoff climb target)
+
+# # 4) Dikey hız denetleyicisi (wind-up azalt)
+# param set-default MPC_Z_VEL_I_ACC 1.0     # ekranında 2.00 idi → yarıya in
+# param set-default MPC_Z_VEL_P_ACC 4.0     # aynı kalsın
+# param set-default MPC_Z_VEL_D_ACC 0.0     # 0 kalsın
+
+# 5) Throttle eğrisi (hover çevresini yumuşat)
+param set-default THR_MDL_FAC 0.5
+
+param set-default NAV_DLL_ACT 2

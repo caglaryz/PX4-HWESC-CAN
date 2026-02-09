@@ -435,3 +435,15 @@ PARAM_DEFINE_INT32(UAVCAN_SUB_RNG, 0);
  * @group UAVCAN
  */
 PARAM_DEFINE_INT32(UAVCAN_SUB_BTN, 0);
+
+/**
+ * subscription load cell
+ *
+ * Enable UAVCAN load cell subscription.
+ *  com::h3robotics::LoadCellArray
+ *
+ * @boolean
+ * @reboot_required true
+ * @group UAVCAN
+ */
+PARAM_DEFINE_INT32(UAVCAN_SUB_WGT, 0);

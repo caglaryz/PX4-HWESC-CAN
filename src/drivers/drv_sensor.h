@@ -248,6 +248,8 @@
 #define DRV_BARO_DEVTYPE_AUAV		0xE7
 #define DRV_BARO_DEVTYPE_SPA06          0xE8
 
+#define DRV_LOAD_CELL_DEVTYPE_UAVCAN    0xfe	// Temporary Type for UAVCAN load cell sensors
+
 #define DRV_DEVTYPE_UNUSED		0xff
 
 #endif /* _DRV_SENSOR_H */

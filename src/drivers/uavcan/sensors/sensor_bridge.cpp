@@ -81,6 +81,9 @@
 #if defined(CONFIG_UAVCAN_SENSOR_SAFETY_BUTTON)
 #include "safety_button.hpp"
 #endif
+#if defined(CONFIG_UAVCAN_SENSOR_LOAD_CELL)
+#include "loadcell.hpp"
+#endif
 
 /*
  * IUavcanSensorBridge
@@ -241,6 +244,17 @@ void IUavcanSensorBridge::make_all(uavcan::INode &node, List<IUavcanSensorBridge
 		list.add(new UavcanSafetyButtonBridge(node));
 	}
 
+#endif
+
+	// load cell
+
+#if defined(CONFIG_UAVCAN_SENSOR_LOAD_CELL)
+	int32_t uavcan_sub_load_cell = 1;
+	param_get(param_find("UAVCAN_SUB_WGT"), &uavcan_sub_load_cell);
+
+	if (uavcan_sub_load_cell != 0) {
+		list.add(new UavcanLoadCellBridge(node));
+	}
 #endif
 }
 

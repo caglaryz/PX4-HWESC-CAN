@@ -89,6 +89,9 @@ if DRIVERS_UAVCAN
     config UAVCAN_SENSOR_SAFETY_BUTTON
         bool "Subscribe to Safety Button:               ardupilot::indication::Button"
         default y
+    config UAVCAN_SENSOR_LOAD_CELL
+	bool "Subscribe to Load Cell:                   com::h3robotics::LoadCellArray"
+        default y
 
 endif #DRIVERS_UAVCAN
 

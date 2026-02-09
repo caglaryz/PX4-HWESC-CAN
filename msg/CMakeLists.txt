@@ -195,6 +195,7 @@ set(msg_files
 	SensorGyro.msg
 	SensorGyroFft.msg
 	SensorGyroFifo.msg
+	SensorLoadCell.msg
 	SensorHygrometer.msg
 	SensorMag.msg
 	SensorOpticalFlow.msg
