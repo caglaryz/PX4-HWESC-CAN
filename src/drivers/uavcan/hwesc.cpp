@@ -103,6 +103,20 @@ void UavcanHWingEscDriver::hwesc_statusmsg1_sub_cb(const uavcan::ReceivedDataStr
 	}
 	auto &esc = _esc_data[idx];
 
+	/* TODO: Validate the received RPM, apply bounds checking.
+	 * How do you plan to set the bounds? Every Hobbywing Motor has a different min-max RPM.
+	 * We introduce additional an user param bitmask to select the specific model, which will
+	 * then be used to fetch the min-max values from the corresponding header hw_motors.h.
+	 */
+
+	if (msg.rpm < hwesc::RPM_MIN || msg.rpm > hwesc::RPM_MAX) {
+		PX4_WARN("Received out-of-bounds RPM value %u from node %u", msg.rpm, esc.node_id);
+		return;
+	} if(!PX4_ISFINITE(msg.rpm)) {
+		PX4_WARN("Received non-finite RPM value from node %u", esc.node_id);
+		return;
+	}
+
 	esc.rpm = msg.rpm;
 	esc.pwm = msg.pwm;
 	esc.status_flags = msg.status;
@@ -148,8 +162,8 @@ bool UavcanHWingEscDriver::check_online(int idx, uint64_t now)
 {
 	ESCStatus &esc = _esc_data[idx];
 
-	if (esc.online && (hrt_elapsed_time(&esc.timestamp_id) > hwesc::STATUS_TIMEOUT)) {
-		// Status Message Timeout!
+	if (esc.online && (hrt_elapsed_time(&esc.timestamp_id) > hwesc::DISCOVERY_TIMEOUT)) {
+		// Heartbeat Timeout!
 		esc.online = false;
 		// Transition logging
 		PX4_WARN("ESC %d (node %d) heartbeat timed out", esc.throttle_id, esc.node_id);
@@ -159,9 +173,10 @@ bool UavcanHWingEscDriver::check_online(int idx, uint64_t now)
 		return esc.online;
 	}
 
-	bool msg1_ok = esc.msg1_received && (hrt_elapsed_time(&esc.timestamp_msg1) < hwesc::STATUS_TIMEOUT);
-	bool msg2_ok = esc.msg2_received && (hrt_elapsed_time(&esc.timestamp_msg2) < hwesc::STATUS_TIMEOUT);
-	// bool msg3_ok = esc.msg3_received && (hrt_elapsed_time(&esc.timestamp_msg3) < hwesc::STATUS_TIMEOUT);
+	/* timeout based online check*/
+	bool msg1_ok = (esc.timestamp_msg1 > 0) && (hrt_elapsed_time(&esc.timestamp_msg1) < hwesc::STATUS_TIMEOUT);
+	bool msg2_ok = (esc.timestamp_msg2 > 0) && (hrt_elapsed_time(&esc.timestamp_msg2) < hwesc::STATUS_TIMEOUT);
+	// bool msg3_ok = (esc.timestamp_msg3 > 0) && (hrt_elapsed_time(&esc.timestamp_msg3) < hwesc::STATUS_TIMEOUT);
 
 	bool status_ok = msg1_ok && msg2_ok; // && msg3_ok;
 
@@ -273,9 +288,12 @@ void UavcanHWingEscDriver::maybe_publish_status(uint64_t now)
 	// Publish MSG1 and MSG2 data to esc_status uORB topic whenever possible.
 	esc_status_s status{};
 	status.timestamp = hrt_absolute_time();
-	status.esc_connectiontype = esc_status_s::ESC_CONNECTION_TYPE_CAN;
+	/* Although we use CAN for telemetry, the ESCs are controlled via PWM from the flight controller, so report PPM as connection type. */
+	status.esc_connectiontype = esc_status_s::ESC_CONNECTION_TYPE_PPM;
+	/* Required by arming checks, and DNF operation. */
 	status.esc_online_flags = 0;
 
+	/* Used by EscBattery to get average electrical values*/
 	uint8_t online_count = 0;
 
 	for (int i = 0; i <hwesc::MAX_ESC; ++i) {
@@ -284,15 +302,19 @@ void UavcanHWingEscDriver::maybe_publish_status(uint64_t now)
 		bool esc_online = check_online(i,now);
 
 		if (esc_online) {
-			++online_count;
+			online_count++;
+		}
 
+		bool has_data = e.msg1_received && e.msg2_received; // && e.msg3_received;
+
+		if (esc_online && has_data) {
 			status.esc[i].timestamp       	= status.timestamp;
 			status.esc[i].esc_address     	= e.node_id;
 			status.esc[i].esc_voltage     	= e.voltage_dv * 0.1f;
 			status.esc[i].esc_current     	= e.current_da * 0.1f;
 			status.esc[i].esc_temperature 	= e.temperature_deg;
 			status.esc[i].esc_rpm         	= e.rpm;
-			status.esc[i].esc_power 	= static_cast<int8_t>((e.pwm / 8191.0f) * 100.0f);
+			status.esc[i].esc_power 	= static_cast<int8_t>((e.pwm / 8191.0f) * 100.0f);	// Convert 0..8191 to 0..100% (assuming 13-bit resolution for PWM)
 			status.esc[i].failures	    	= statusflags_to_failures(e.status_flags);
 			status.esc[i].esc_errorcount  	= 0;		// TODO: add error count if available
 
@@ -302,7 +324,7 @@ void UavcanHWingEscDriver::maybe_publish_status(uint64_t now)
 			_esc_data[i].msg1_received = false;
 			_esc_data[i].msg2_received = false;
 		} else {
-			// Not online.
+			// The online flags are already initialized to 0, so no need to clear them here.
 		}
 
 	}

@@ -34,6 +34,9 @@ static constexpr uint64_t DISCOVERY_TIMEOUT = 3'000'000ULL;	///< 3 s
 static constexpr uint64_t GET_ID_FAST_PERIOD = 100'000ULL;	///< 0.1 s
 static constexpr uint64_t GET_ID_SLOW_PERIOD = 1'000'000ULL;	///< 1 s
 
+static constexpr uint16_t RPM_MIN = 0;
+static constexpr uint16_t RPM_MAX = 4000;  // 500 rpm above than HW X11 Plus specs
+
 /* ---------- scaling factors ------------------------------------------------- */
 static constexpr float DECI2V             = 0.1f;  		///< deciVolt → Volt
 static constexpr float DECI2A             = 0.1f;  		///< deciAmp  → Amp
