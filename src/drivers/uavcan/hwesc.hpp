@@ -1,8 +1,10 @@
 #pragma once
 
 #include <uORB/Publication.hpp>
-// #include <uORB/topics/esc_hw_status.h>
 #include <uORB/topics/esc_status.h>
+
+#include <uORB/Subscription.hpp>
+#include <uORB/topics/actuator_armed.h>
 
 #include <uavcan/uavcan.hpp>
 #include <com/hobbywing/esc/GetEscID.hpp>
@@ -48,6 +50,7 @@ struct ESCStatus {
 	uint8_t throttle_id;
 	uint8_t node_id;
 	bool	online{false};
+	bool 	armed{false};		///< ESC Armed status from PX4, not from ESC itself. Need to set when publishing EscStatus uORB.
 	uint16_t rpm{0};
 	uint16_t pwm{0};
 	uint16_t status_flags;
@@ -137,6 +140,7 @@ private:
 
 	uavcan::TimerEventForwarder<TimerCbBinder> _timer;
 
-	// uORB::Publication<esc_hw_status_s> _hwesc_status_pub{ORB_ID(esc_hw_status)};
 	uORB::Publication<esc_status_s> _esc_status_pub{ORB_ID(esc_status)};
+
+	uORB::Subscription _actuator_armed_sub{ORB_ID(actuator_armed)};
 };

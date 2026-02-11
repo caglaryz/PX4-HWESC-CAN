@@ -108,12 +108,8 @@ void UavcanHWingEscDriver::hwesc_statusmsg1_sub_cb(const uavcan::ReceivedDataStr
 	 * We introduce additional an user param bitmask to select the specific model, which will
 	 * then be used to fetch the min-max values from the corresponding header hw_motors.h.
 	 */
-
 	if (msg.rpm < hwesc::RPM_MIN || msg.rpm > hwesc::RPM_MAX) {
 		PX4_WARN("Received out-of-bounds RPM value %u from node %u", msg.rpm, esc.node_id);
-		return;
-	} if(!PX4_ISFINITE(msg.rpm)) {
-		PX4_WARN("Received non-finite RPM value from node %u", esc.node_id);
 		return;
 	}
 
@@ -285,52 +281,103 @@ statusflags_to_failures(uint16_t s)
 
 void UavcanHWingEscDriver::maybe_publish_status(uint64_t now)
 {
-	// Publish MSG1 and MSG2 data to esc_status uORB topic whenever possible.
-	esc_status_s status{};
-	status.timestamp = hrt_absolute_time();
-	/* Although we use CAN for telemetry, the ESCs are controlled via PWM from the flight controller, so report PPM as connection type. */
-	status.esc_connectiontype = esc_status_s::ESC_CONNECTION_TYPE_PPM;
-	/* Required by arming checks, and DNF operation. */
-	status.esc_online_flags = 0;
+    esc_status_s status{};
+    status.timestamp = hrt_absolute_time();
+    status.esc_connectiontype = esc_status_s::ESC_CONNECTION_TYPE_CAN;
+    status.esc_online_flags = 0;
+    status.esc_armed_flags = 0;
 
-	/* Used by EscBattery to get average electrical values*/
-	uint8_t online_count = 0;
+    actuator_armed_s armed;
+    bool vehicle_armed = false;
+    if (_actuator_armed_sub.copy(&armed)) {
+        vehicle_armed = armed.armed;
+    }
 
-	for (int i = 0; i <hwesc::MAX_ESC; ++i) {
-		const ESCStatus &e = _esc_data[i];
+    // ============================================================
+    // PHASE 1: Check online status
+    // ============================================================
+    uint8_t online_count = 0;
+    bool any_new_data = false;
 
-		bool esc_online = check_online(i,now);
+    for (int i = 0; i < hwesc::MAX_ESC; ++i) {
+        ESCStatus &e = _esc_data[i];
+        bool esc_online = check_online(i, now);
 
-		if (esc_online) {
-			online_count++;
-		}
+        if (esc_online) {
+            ++online_count;
 
-		bool has_data = e.msg1_received && e.msg2_received; // && e.msg3_received;
+            // Check if this ESC has new data
+            if (e.msg1_received || e.msg2_received) {
+                any_new_data = true;
+            }
+        }
+    }
 
-		if (esc_online && has_data) {
-			status.esc[i].timestamp       	= status.timestamp;
-			status.esc[i].esc_address     	= e.node_id;
-			status.esc[i].esc_voltage     	= e.voltage_dv * 0.1f;
-			status.esc[i].esc_current     	= e.current_da * 0.1f;
-			status.esc[i].esc_temperature 	= e.temperature_deg;
-			status.esc[i].esc_rpm         	= e.rpm;
-			status.esc[i].esc_power 	= static_cast<int8_t>((e.pwm / 8191.0f) * 100.0f);	// Convert 0..8191 to 0..100% (assuming 13-bit resolution for PWM)
-			status.esc[i].failures	    	= statusflags_to_failures(e.status_flags);
-			status.esc[i].esc_errorcount  	= 0;		// TODO: add error count if available
+    // ============================================================
+    // PHASE 2: Decide whether to publish
+    // ============================================================
+    bool should_publish = false;
 
-			status.esc_online_flags |= (1u << i);
+    if (online_count == 0) {
+        // CRITICAL: All ESCs offline → publish immediately!
+        should_publish = true;
 
-			// Clear edge flags for next cycle so don't report same data again.
-			_esc_data[i].msg1_received = false;
-			_esc_data[i].msg2_received = false;
-		} else {
-			// The online flags are already initialized to 0, so no need to clear them here.
-		}
+    } else if (any_new_data) {
+        // At least one online ESC has new data → publish
+        should_publish = true;
 
-	}
-	status.esc_count = online_count;
-	status.counter++;
+    } else {
+        // ESCs online but no new data → skip
+        // Will timeout after 700ms if persistent
+        should_publish = false;
+    }
 
-	_esc_status_pub.publish(status);
+    if (!should_publish) {
+        return;
+    }
+
+    // ============================================================
+    // PHASE 3: Populate data for online ESCs
+    // ============================================================
+    online_count = 0;  // Recalculate
+
+    for (int i = 0; i < hwesc::MAX_ESC; ++i) {
+        ESCStatus &e = _esc_data[i];
+        bool esc_online = check_online(i, now);
+
+        if (esc_online) {
+            ++online_count;
+            status.esc_online_flags |= (1u << i);
+
+            if (vehicle_armed) {
+                status.esc_armed_flags |= (1u << i);
+            }
+
+            // Populate with current data
+            status.esc[i].timestamp       = status.timestamp;
+            status.esc[i].esc_address     = e.node_id;
+            status.esc[i].esc_voltage     = e.voltage_dv * 0.1f;
+            status.esc[i].esc_current     = e.current_da * 0.1f;
+            status.esc[i].esc_temperature = e.temperature_deg;
+            status.esc[i].esc_rpm         = e.rpm;
+            status.esc[i].esc_power       = static_cast<int8_t>((e.pwm / 8191.0f) * 100.0f);
+            status.esc[i].failures        = statusflags_to_failures(e.status_flags);
+            status.esc[i].esc_errorcount  = 0;
+
+            // Clear edge flags
+            if (e.msg1_received || e.msg2_received) {
+                e.msg1_received = false;
+                e.msg2_received = false;
+            }
+        }
+    }
+
+    status.esc_count = online_count;
+    status.counter++;
+
+    // ============================================================
+    // PUBLISH
+    // ============================================================
+    _esc_status_pub.publish(status);
 }
 
